@@ -6,6 +6,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn}; // Added debug
 
+use crate::api::birdeye::BirdeyeClient; // Add BirdeyeClient import
 use crate::api::helius::HeliusClient;
 use crate::api::jupiter::{JupiterClient, SwapResult}; // Added SwapResult
 use crate::config::Config;
@@ -359,18 +360,26 @@ pub struct AutoTrader {
 }
 
 impl AutoTrader {
+    // Update constructor to return Result<Self> and accept Config by value or Arc
     pub fn new(
         wallet_manager: Arc<WalletManager>,
         solana_client: Arc<SolanaClient>,
-        config: Arc<Config>, // Take Arc<Config>
-    ) -> Self { // Return Self directly
+        config: Arc<Config>, // Keep Arc<Config>
+    ) -> Result<Self> { // Return Result<Self>
         // Initialize clients and analyzers potentially shared via Arc
         let helius_client = Arc::new(HeliusClient::new(&config.helius_api_key));
         let jupiter_client = Arc::new(JupiterClient::new(config.jupiter_api_key.clone())); // Clone Option<String>
+
+        // Initialize BirdeyeClient - require the API key for now
+        let birdeye_api_key = config.birdeye_api_key.as_ref()
+            .context("BIRDEYE_API_KEY is required but missing in config")?;
+        let birdeye_client = Arc::new(BirdeyeClient::new(birdeye_api_key));
+
         let risk_analyzer = Arc::new(RiskAnalyzer::new(
             solana_client.clone(),
             helius_client.clone(),
             jupiter_client.clone(),
+            birdeye_client.clone(), // Pass BirdeyeClient
             wallet_manager.clone(), // Pass WalletManager to RiskAnalyzer::new
         ));
         let position_manager = Arc::new(PositionManager::new(
@@ -380,7 +389,7 @@ impl AutoTrader {
             config.clone(),
         )); // Corrected syntax: Ensure this parenthesis closes Arc::new
 
-        Self { // Return Self directly
+        Ok(Self { // Wrap return in Ok()
             wallet_manager,
             solana_client,
             helius_client,

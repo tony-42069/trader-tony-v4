@@ -4,6 +4,7 @@ use solana_sdk::pubkey::Pubkey; // Added Pubkey
 use std::{str::FromStr, sync::Arc}; // Added FromStr
 use tracing::{debug, info, warn}; // Added warn, debug
 
+use crate::api::birdeye::BirdeyeClient; // Import BirdeyeClient
 use crate::api::helius::HeliusClient;
 use crate::api::jupiter::JupiterClient;
 use crate::solana::client::SolanaClient;
@@ -33,6 +34,7 @@ pub struct RiskAnalyzer {
     solana_client: Arc<SolanaClient>,
     helius_client: Arc<HeliusClient>, // Use Arc if shared
     jupiter_client: Arc<JupiterClient>, // Use Arc if shared
+    birdeye_client: Arc<BirdeyeClient>, // Add BirdeyeClient
     wallet_manager: Arc<WalletManager>, // Added WalletManager
 }
 
@@ -41,13 +43,15 @@ impl RiskAnalyzer {
         solana_client: Arc<SolanaClient>,
         helius_client: Arc<HeliusClient>,
         jupiter_client: Arc<JupiterClient>,
+        birdeye_client: Arc<BirdeyeClient>, // Add BirdeyeClient parameter
         wallet_manager: Arc<WalletManager>, // Added WalletManager
     ) -> Self {
         Self {
             solana_client,
             helius_client,
-            wallet_manager, // Added WalletManager
             jupiter_client,
+            birdeye_client, // Initialize BirdeyeClient field
+            wallet_manager, // Added WalletManager
         }
     }
 
@@ -88,25 +92,37 @@ impl RiskAnalyzer {
             }
         };
 
-        // 2. Liquidity Check (Placeholder - Needs real implementation)
-        // TODO: Implement proper liquidity check using DEX APIs (Raydium, Orca via Jupiter/Birdeye?)
-        //       or dedicated liquidity pool analysis.
-        let liquidity_sol = self.check_liquidity_placeholder(&token_pubkey).await?;
-        if liquidity_sol < 5.0 { // Example threshold
+        // 2. Liquidity Check (Using Birdeye)
+        // TODO: Refine BirdeyeClient implementation for accurate SOL liquidity.
+        let liquidity_sol = match self.check_liquidity(&token_pubkey).await { // Call the new function
+            Ok(liq) => liq,
+            Err(e) => {
+                warn!("Failed to check liquidity for {}: {:?}. Assuming 0.", token_address_str, e);
+                details.push("❓ Failed to check liquidity.".to_string());
+                0.0 // Assume 0 liquidity on error
+            }
+        };
+        if liquidity_sol < 5.0 { // Example threshold (adjust based on Birdeye data)
              risk_score += 20;
-             details.push(format!("🟠 Low liquidity ({:.2} SOL).", liquidity_sol));
+             details.push(format!("🟠 Low liquidity ({:.2} SOL).", liquidity_sol)); // Keep SOL unit for now
         } else {
              details.push(format!("✅ Liquidity: {:.2} SOL.", liquidity_sol));
         }
 
 
-        // 3. LP Token Check (Placeholder - Needs real implementation)
-        // TODO: Implement check to see if LP tokens for the main pair (e.g., TOKEN/SOL)
-        //       are sent to a burn address or locked in a known locker contract.
-        let lp_tokens_burned = self.check_lp_tokens_burned_placeholder(&token_pubkey).await?;
+        // 3. LP Token Check (Placeholder)
+        // TODO: Implement actual check using primary pair LP mint address (requires pair finding).
+        let lp_tokens_burned = match self.check_lp_tokens_burned(&token_pubkey).await { // Call renamed function
+             Ok(burned) => burned,
+             Err(e) => {
+                 warn!("Failed to check LP token status for {}: {:?}. Assuming not burned.", token_address_str, e);
+                 details.push("❓ Failed to check LP token status.".to_string());
+                 false // Assume not burned on error
+             }
+        };
         if !lp_tokens_burned {
             risk_score += 15;
-            details.push("🟠 LP tokens may not be burned/locked.".to_string());
+            details.push("🟠 LP tokens may not be burned/locked (Placeholder Check).".to_string());
         } else {
              details.push("✅ LP tokens appear burned/locked.".to_string());
         }
@@ -124,7 +140,14 @@ impl RiskAnalyzer {
 
         // 5. Holder Distribution Check (Placeholder)
         // TODO: Implement using RPC calls (getTokenLargestAccounts) or Helius/Birdeye APIs.
-        let (holder_count, concentration_percent) = self.check_holder_distribution_placeholder(&token_pubkey).await?;
+        let (holder_count, concentration_percent) = match self.check_holder_distribution(&token_pubkey).await { // Call renamed function
+            Ok(data) => data,
+            Err(e) => {
+                warn!("Failed to check holder distribution for {}: {:?}. Assuming 0 holders, 100% concentration.", token_address_str, e);
+                details.push("❓ Failed to check holder distribution.".to_string());
+                (0, 100.0) // Assume worst case on error
+            }
+        };
          if holder_count < 50 { // Example threshold
              risk_score += 10;
              details.push(format!("🟠 Low holder count ({}).", holder_count));
@@ -139,11 +162,18 @@ impl RiskAnalyzer {
         }
 
         // 6. Transfer Tax Check (Placeholder)
-        // TODO: Implement by simulating a transfer or analyzing token program extensions if applicable.
-        let transfer_tax_percent = self.check_transfer_tax_placeholder(&token_pubkey).await?;
+        // TODO: Implement actual check using Token-2022 extensions or simulation.
+        let transfer_tax_percent = match self.check_transfer_tax(&token_pubkey).await { // Call renamed function
+            Ok(tax) => tax,
+            Err(e) => {
+                warn!("Failed to check transfer tax for {}: {:?}. Assuming 0%.", token_address_str, e);
+                details.push("❓ Failed to check transfer tax.".to_string());
+                0.0 // Assume 0 tax on error
+            }
+        };
         if transfer_tax_percent > 5.0 { // Example threshold
             risk_score += (transfer_tax_percent as u32).min(25); // Cap penalty
-            details.push(format!("🟠 High transfer tax ({:.1}%).", transfer_tax_percent));
+            details.push(format!("🟠 High transfer tax ({:.1}% - Placeholder Check).", transfer_tax_percent));
         } else if transfer_tax_percent > 0.0 {
              details.push(format!("✅ Low transfer tax ({:.1}%).", transfer_tax_percent));
         } else {
@@ -174,8 +204,7 @@ impl RiskAnalyzer {
         })
     }
 
-    // --- Placeholder Implementations ---
-    // Replace these with actual logic using SolanaClient, HeliusClient, JupiterClient, etc.
+    // --- Risk Check Implementations ---
 
     async fn check_mint_freeze_authority(&self, token_mint: &Pubkey) -> Result<(bool, bool)> {
         debug!("Checking mint/freeze authority for {}", token_mint);
@@ -188,35 +217,18 @@ impl RiskAnalyzer {
         Ok((has_mint_authority, has_freeze_authority))
     }
 
-    // Attempt to get liquidity info - Placeholder, needs refinement
-    async fn check_liquidity_placeholder(&self, token_address: &Pubkey) -> Result<f64> {
-        warn!("Liquidity check is using placeholder data and Jupiter price check as a proxy.");
-        // TODO: Implement actual liquidity check using DEX APIs (e.g., Raydium SDK, Orca SDK)
-        //       or dedicated market data APIs (Birdeye, DexScreener).
-        //       This requires finding the primary liquidity pool (e.g., TOKEN/SOL).
-
-        // As a very rough proxy, check if we can get a price quote from Jupiter.
-        // This doesn't measure liquidity depth, only if a route exists.
-        match self.jupiter_client.get_price(
-            &crate::api::jupiter::SOL_MINT.to_string(), // Price vs SOL
-            &token_address.to_string(),
-            9 // Assume 9 decimals for price check, might need actual decimals
-        ).await {
-            Ok(_price) => {
-                // If we get a price, assume some minimal liquidity exists for now.
-                // Return a placeholder value. A real implementation needs pool data.
-                debug!("Got price quote for {}, assuming placeholder liquidity.", token_address);
-                Ok(10.0) // Placeholder value indicating some liquidity
-            }
-            Err(e) => {
-                warn!("Failed to get price quote for {} (potential low/no liquidity): {:?}", token_address, e);
-                Ok(0.0) // Assume 0 liquidity if price check fails
-            }
-        }
+    // Checks liquidity using the BirdeyeClient
+    async fn check_liquidity(&self, token_address: &Pubkey) -> Result<f64> {
+        debug!("Checking liquidity via Birdeye for {}", token_address);
+        // Use the Birdeye client to fetch liquidity data
+        // The BirdeyeClient::get_liquidity_sol function currently returns a placeholder.
+        // It needs to be implemented correctly based on Birdeye's API response structure
+        // to extract actual SOL liquidity from the primary pair.
+        self.birdeye_client.get_liquidity_sol(&token_address.to_string()).await
+            .context(format!("Failed to get liquidity from Birdeye for {}", token_address))
     }
 
-
-    async fn check_lp_tokens_burned_placeholder(&self, token_address: &Pubkey) -> Result<bool> {
+    async fn check_lp_tokens_burned(&self, token_address: &Pubkey) -> Result<bool> { // Renamed function
         warn!("LP token burn check is using placeholder data and needs full implementation.");
         // TODO: Implement actual LP token burn/lock check.
         // Steps:
@@ -376,7 +388,7 @@ impl RiskAnalyzer {
         }
     }
 
-    async fn check_holder_distribution_placeholder(&self, token_address: &Pubkey) -> Result<(u32, f64)> {
+    async fn check_holder_distribution(&self, token_address: &Pubkey) -> Result<(u32, f64)> { // Renamed function
         warn!("Holder distribution check is using placeholder data and needs full implementation.");
         // TODO: Implement actual holder distribution check.
         // Steps:
@@ -397,7 +409,7 @@ impl RiskAnalyzer {
         Ok((holder_count, concentration_percent))
     }
 
-    async fn check_transfer_tax_placeholder(&self, token_address: &Pubkey) -> Result<f64> {
+    async fn check_transfer_tax(&self, token_address: &Pubkey) -> Result<f64> { // Renamed function
         warn!("Transfer tax check is using placeholder data and needs full implementation.");
         // TODO: Implement actual transfer tax check.
         // Steps:

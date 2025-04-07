@@ -24,7 +24,7 @@ This plan outlines the logical steps for completing the remaining features, prio
 **Phase 2: Enhancing Decision Making & Robustness** (Improve bot intelligence and stability)
 6.  [ ] **Implement Remaining Risk Analysis Checks (`risk.rs`):**
     *   **Why:** Improves automated trading decisions with comprehensive risk assessment.
-    *   **How:** Implement actual logic for `check_liquidity`, `check_lp_tokens_burned`, `check_holder_distribution`, `check_transfer_tax`.
+    *   **How:** Implement actual logic for `check_liquidity` (using Birdeye - *structure added, impl pending*), `check_lp_tokens_burned`, `check_holder_distribution`, `check_transfer_tax`.
 7.  [ ] **Robust Error Handling & Retries (`solana/client.rs`):**
     *   **Why:** Makes RPC interactions less prone to temporary network issues.
     *   **How:** Wrap RPC calls with retry logic (e.g., `tokio-retry`).
@@ -51,7 +51,7 @@ This plan outlines the logical steps for completing the remaining features, prio
 
 ## Core Functionality
 - [ ] **Risk Analysis (`risk.rs`):**
-    - [ ] Implement `check_liquidity` (using DEX APIs/SDKs) - *Partially proxied via price check*
+    - [ ] Implement `check_liquidity` (using Birdeye - *structure added, impl pending*)
     - [ ] Implement `check_lp_tokens_burned` (find LP, check holders/burn address)
     - [ ] Implement `check_holder_distribution` (using RPC/Helius)
     - [ ] Implement `check_transfer_tax` (Token-2022/simulation)
