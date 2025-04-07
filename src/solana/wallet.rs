@@ -111,16 +111,24 @@ impl WalletManager {
         // Sign the VersionedTransaction using the keypair
         // The `sign` method takes a slice of signers.
         // It modifies the transaction in place and returns a Result.
-        // We need to pass a reference to the Keypair itself, not the Arc.
-        // TODO: Fix signing - Compiler error E0599 persists despite correct-looking code.
-        // transaction.sign(&[&*self.keypair], transaction.message.recent_blockhash())
-        //     .map_err(|e| {
-        //         error!("Failed to sign versioned transaction: {}", e);
-        //         TraderbotError::WalletError(format!("Signing failed: {}", e))
-        //     })?; // Handle the Result
-        warn!("Transaction signing is currently commented out due to compilation issues!");
+        // Sign the transaction message bytes using the keypair
+        let message_bytes = transaction.message.serialize();
+        let signature = self.keypair.try_sign_message(&message_bytes)
+             .map_err(|e| {
+                 error!("Failed to sign versioned transaction message: {}", e);
+                 TraderbotError::WalletError(format!("Signing failed: {}", e))
+             })?;
 
-        // debug!("Signed versioned transaction with blockhash: {}", transaction.message.recent_blockhash()); // Commented out as tx is not signed
+        // Replace the first (payer) signature placeholder with the actual signature
+        if transaction.signatures.is_empty() {
+             // This shouldn't happen for transactions created by Jupiter API, but handle defensively
+             error!("Transaction has no signature slots to place signature.");
+             return Err(TraderbotError::WalletError("Transaction has no signature slots".to_string()).into());
+        }
+        transaction.signatures[0] = signature;
+
+        // Removed warning: warn!("Transaction signing is currently commented out due to compilation issues!");
+        tracing::debug!("Signed versioned transaction with blockhash: {}", transaction.message.recent_blockhash()); // Re-enabled debug log
 
         // Send the transaction (without confirmation here)
         let signature = self
