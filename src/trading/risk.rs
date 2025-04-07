@@ -138,8 +138,8 @@ impl RiskAnalyzer {
              details.push("✅ Passed sell simulation.".to_string());
         }
 
-        // 5. Holder Distribution Check (Placeholder)
-        // TODO: Implement using RPC calls (getTokenLargestAccounts) or Helius/Birdeye APIs.
+        // 5. Holder Distribution Check (Implemented)
+        // TODO: Use a better source like Helius or Birdeye if available for accurate holder count.
         let (holder_count, concentration_percent) = match self.check_holder_distribution(&token_pubkey).await { // Call renamed function
             Ok(data) => data,
             Err(e) => {
@@ -150,15 +150,15 @@ impl RiskAnalyzer {
         };
          if holder_count < 50 { // Example threshold
              risk_score += 10;
-             details.push(format!("🟠 Low holder count ({}).", holder_count));
+             details.push(format!("🟠 Low holder count ({} - Estimated).", holder_count));
          } else {
-              details.push(format!("✅ Holder count: {}.", holder_count));
+              details.push(format!("✅ Holder count: {} (Estimated).", holder_count));
          }
         if concentration_percent > 50.0 { // Example threshold for top 10 holders
             risk_score += 15;
-            details.push(format!("🟠 High holder concentration ({:.1}% in top holders).", concentration_percent));
+            details.push(format!("🟠 High holder concentration ({:.1}% in top 10).", concentration_percent));
         } else {
-             details.push(format!("✅ Holder concentration: {:.1}%.", concentration_percent));
+             details.push(format!("✅ Holder concentration: {:.1}% (Top 10).", concentration_percent));
         }
 
         // 6. Transfer Tax Check (Placeholder)
@@ -194,7 +194,7 @@ impl RiskAnalyzer {
             risk_level: final_risk_level,
             details,
             liquidity_sol,
-            holder_count,
+            holder_count, // Note: This is currently an estimate
             has_mint_authority,
             has_freeze_authority,
             lp_tokens_burned,
@@ -229,20 +229,42 @@ impl RiskAnalyzer {
     }
 
     async fn check_lp_tokens_burned(&self, token_address: &Pubkey) -> Result<bool> { // Renamed function
-        warn!("LP token burn check is using placeholder data and needs full implementation.");
-        // TODO: Implement actual LP token burn/lock check.
-        // Steps:
-        // 1. Find the primary liquidity pool address for the token (e.g., TOKEN/SOL).
-        //    - This might require querying an external API (Helius get_token_metadata, Birdeye, Jupiter strict list)
-        //    - Or finding the pool associated with the token mint via Raydium/Orca SDKs/APIs.
-        // 2. Get the LP token mint address associated with that pool.
-        // 3. Use `solana_client.get_token_supply(&lp_mint_pubkey)` to get total supply.
-        // 4. Use `solana_client.get_token_largest_accounts(&lp_mint_pubkey)` to get top holders.
-        // 5. Check if a known burn address (e.g., 11111111111111111111111111111111) holds >95% of the supply.
-        // 6. Alternatively/Additionally, check if significant amounts are held by known locker contract addresses.
-        // 7. Return true if burned/locked, false otherwise.
+        // TODO: Implement actual LP token burn/lock check. This is complex.
+        // Step 1: Find the primary SOL liquidity pool address for the token.
+        //      - Method A: Use Birdeye token overview endpoint (if available and provides pair address).
+        //      - Method B: Use Helius DAS API (if it includes market/pair data).
+        //      - Method C: Query DEX program accounts (e.g., Raydium, Orca) - requires SDKs or complex RPC parsing.
+        //      - Method D: Use a hardcoded list or external service mapping tokens to pairs.
+        //      -> Requires further investigation / implementation choice.
+        // let primary_pool_address = find_primary_sol_pool(token_address).await?; // Placeholder
 
-        // Placeholder logic:
+        // Step 2: Get the LP token mint address associated with that pool.
+        //      - Requires fetching pool account data and knowing the specific DEX's state layout
+        //        (e.g., Raydium `amm_info_layout_v4`, Orca `whirlpool_state`) to find the `lp_mint` field.
+        // let lp_mint_pubkey = get_lp_mint_for_pool(primary_pool_address).await?; // Placeholder
+
+        // Step 3: Get total supply of the LP token.
+        // let total_supply = self.solana_client.get_token_supply(&lp_mint_pubkey).await?;
+
+        // Step 4: Get largest holders of the LP token.
+        // let largest_holders = self.solana_client.get_token_largest_accounts(&lp_mint_pubkey).await?;
+
+        // Step 5: Check if a known burn address holds >95% of the supply.
+        // let burn_address = Pubkey::from_str("11111111111111111111111111111111")?;
+        // let mut burned_amount: u64 = 0;
+        // for holder in largest_holders {
+        //     if Pubkey::from_str(&holder.address)? == burn_address {
+        //         // Need to parse holder.ui_amount_string based on LP token decimals
+        //         // burned_amount += parse_ui_amount(&holder.ui_amount_string, lp_decimals)?;
+        //     }
+        // }
+        // let is_burned = (burned_amount as f64 / total_supply as f64) > 0.95;
+
+        // Step 6: Optionally check known locker addresses.
+
+        // Step 7: Return true if burned/locked, false otherwise.
+
+        // --- Current Placeholder Logic ---
         debug!("LP Burn Check Placeholder for {}", token_address);
         Ok(rand::random::<f64>() > 0.2) // 80% chance LP tokens are "burned" in placeholder
     }
@@ -389,24 +411,51 @@ impl RiskAnalyzer {
     }
 
     async fn check_holder_distribution(&self, token_address: &Pubkey) -> Result<(u32, f64)> { // Renamed function
-        warn!("Holder distribution check is using placeholder data and needs full implementation.");
-        // TODO: Implement actual holder distribution check.
-        // Steps:
-        // 1. Get total supply using `solana_client.get_token_supply(token_address)`.
-        // 2. Get largest token accounts using `solana_client.get_token_largest_accounts(token_address)`.
-        //    - This returns a Vec<RpcTokenAccountBalance> which includes `ui_amount_string`.
-        // 3. Calculate the total amount held by the top N (e.g., top 10) holders.
-        //    - Need to parse `ui_amount_string` to f64/u64, considering decimals.
-        // 4. Calculate the concentration percentage: (top_N_amount / total_supply) * 100.
-        // 5. Estimate total holder count (this is difficult via RPC, might need Helius/Birdeye).
-        //    - Helius DAS API might provide holder count directly in asset metadata.
-        //    - Alternatively, estimate based on the number of accounts returned by `getTokenLargestAccounts` if it returns more than N.
+        // --- Actual Implementation ---
+        debug!("Checking holder distribution for {}", token_address);
 
-        // Placeholder logic:
-        debug!("Holder Distribution Check Placeholder for {}", token_address);
-        let holder_count = 50 + rand::random::<u32>() % 1000; // Random: 50-1049 holders
-        let concentration_percent = rand::random::<f64>() * 60.0; // Random: 0-60% concentration
-        Ok((holder_count, concentration_percent))
+        // Get total supply and decimals
+        let (total_supply, decimals) = match self.solana_client.get_mint_info(token_address).await {
+            Ok(mint_info) => (mint_info.supply, mint_info.decimals),
+            Err(e) => {
+                warn!("Failed to get mint info for holder check {}: {:?}", token_address, e);
+                return Err(e).context("Failed to get mint info for holder check");
+            }
+        };
+
+        if total_supply == 0 {
+            warn!("Token {} has zero supply, cannot calculate holder distribution.", token_address);
+            return Ok((0, 100.0)); // Avoid division by zero, assume max concentration
+        }
+
+        // Get largest accounts
+        let largest_accounts = match self.solana_client.get_token_largest_accounts(token_address).await {
+            Ok(accounts) => accounts,
+            Err(e) => {
+                 warn!("Failed to get largest accounts for holder check {}: {:?}", token_address, e);
+                 return Err(e).context("Failed to get largest accounts for holder check");
+            }
+        };
+
+        // Estimate holder count (using number of largest accounts returned as a proxy - very rough)
+        // TODO: Use a better source like Helius or Birdeye if available for accurate holder count.
+        let holder_count_estimate = largest_accounts.len() as u32;
+        debug!("Estimated holder count for {}: {}", token_address, holder_count_estimate);
+
+
+        // Calculate concentration for top N (e.g., 10) holders
+        let top_n = 10;
+        let mut top_n_amount: u64 = 0;
+        for account in largest_accounts.iter().take(top_n) {
+             // The amount field is already in lamports (u64)
+             top_n_amount += account.amount;
+        }
+
+        let concentration_percent = (top_n_amount as f64 / total_supply as f64) * 100.0;
+        debug!("Top {} holders concentration for {}: {:.2}%", top_n, token_address, concentration_percent);
+
+        Ok((holder_count_estimate, concentration_percent))
+
     }
 
     async fn check_transfer_tax(&self, token_address: &Pubkey) -> Result<f64> { // Renamed function
@@ -430,3 +479,50 @@ impl RiskAnalyzer {
         }
     }
 }
+
+</final_file_content>
+
+IMPORTANT: For any future changes to this file, use the final_file_content shown above as your reference. This content reflects the current state of the file, including any auto-formatting (e.g., if you used single quotes but the formatter converted them to double quotes). Always base your SEARCH/REPLACE operations on this final version to ensure accuracy.
+
+<environment_details>
+# VSCode Visible Files
+src/trading/risk.rs
+
+# VSCode Open Tabs
+.env
+src/config.rs
+src/api/mod.rs
+TODO.md
+src/trading/risk.rs
+src/solana/client.rs
+src/api/birdeye.rs
+src/trading/autotrader.rs
+src/main.rs
+src/solana/wallet.rs
+src/api/helius.rs
+src/api/jupiter.rs
+.gitignore
+src/error.rs
+src/bot/mod.rs
+src/models/mod.rs
+src/models/token.rs
+src/models/user.rs
+src/solana/mod.rs
+src/trading/mod.rs
+src/trading/strategy.rs
+README.md
+deployment.md
+strategy.md
+src/bot/commands.rs
+src/trading/position.rs
+api.md
+.env.example
+Cargo.toml
+src/bot/keyboards.rs
+
+# Current Time
+4/7/2025, 4:46:00 PM (America/New_York, UTC-4:00)
+
+# Current Mode
+ACT MODE
+</environment_details>

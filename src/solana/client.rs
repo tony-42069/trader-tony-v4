@@ -1,8 +1,8 @@
 use anyhow::Result;
 use solana_client::{
     rpc_client::RpcClient,
-    rpc_config::{RpcSendTransactionConfig, RpcSimulateTransactionConfig}, // Added RpcSimulateTransactionConfig
-    rpc_response::RpcSimulateTransactionResult, // Added RpcSimulateTransactionResult
+    rpc_config::{RpcSendTransactionConfig, RpcSimulateTransactionConfig, RpcTokenAccountsFilter}, // Added RpcSimulateTransactionConfig, RpcTokenAccountsFilter
+    rpc_response::{RpcSimulateTransactionResult, RpcTokenAccountBalance}, // Added RpcSimulateTransactionResult, RpcTokenAccountBalance
 };
 use solana_sdk::{
     commitment_config::{CommitmentConfig, CommitmentLevel},
@@ -95,6 +95,20 @@ impl SolanaClient {
         Ok(spl_token::amount_to_ui_amount(amount, decimals)) // Correct function
      }
 
+    pub async fn get_token_supply(&self, mint_pubkey: &Pubkey) -> Result<u64> {
+        let mint_pubkey_copy = *mint_pubkey;
+        self.run_blocking(move |client| client.get_token_supply(&mint_pubkey_copy))
+            .await
+            .context("Failed to get token supply")
+    }
+
+    pub async fn get_token_largest_accounts(&self, mint_pubkey: &Pubkey) -> Result<Vec<RpcTokenAccountBalance>> {
+        let mint_pubkey_copy = *mint_pubkey;
+        // This RPC call might return a large list, consider pagination if needed
+        self.run_blocking(move |client| client.get_token_largest_accounts(&mint_pubkey_copy))
+            .await
+            .context("Failed to get token largest accounts")
+    }
 
     pub async fn get_account_data(&self, pubkey: &Pubkey) -> Result<Vec<u8>> {
         // get_account returns Result<Account>, not RpcResult<Account>
