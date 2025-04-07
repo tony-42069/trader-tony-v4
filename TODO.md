@@ -26,12 +26,13 @@
     - [ ] Add robust error handling and retries for RPC calls in `client.rs`.
     - [ ] Implement transaction confirmation logic in `client.rs` or `wallet.rs`.
 - [ ] **Telegram Bot (`commands.rs` / `keyboards.rs`):**
-    - [ ] Connect `/autotrader` commands to `AutoTrader::start/stop/status`.
-    - [ ] Connect `/strategy` commands to `AutoTrader` strategy methods.
-    - [ ] Connect `/positions` command to `PositionManager::get_active_positions`.
+    - [X] Connect `/autotrader` command & callbacks to `AutoTrader::start/stop/status`.
+    - [X] Connect `/strategy` command to `AutoTrader::list_strategies`.
+    - [X] Connect `/positions` command to `PositionManager::get_active_positions`.
     - [ ] Implement full `/snipe` logic (analysis, buy execution).
     - [ ] Implement `/analyze` logic (call `RiskAnalyzer`).
-    - [ ] Implement callback query handlers for inline keyboard buttons.
+    - [X] Implement basic callback query handler structure & start/stop/menu logic.
+    - [ ] Implement other callback handlers (strategy add/edit/delete, etc.).
     - [ ] Implement notifications for trades, errors, etc.
     - [X] Address `ParseMode::Markdown` deprecation - *Switched to MarkdownV2*
 
