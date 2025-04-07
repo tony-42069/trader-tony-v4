@@ -300,7 +300,7 @@ async fn execute_buy_task(
 
     // Use the SolanaClient from WalletManager to confirm
     // TODO: Make confirmation timeout configurable
-    match wallet_manager.solana_client.confirm_transaction(&signature, solana_sdk::commitment_config::CommitmentLevel::Confirmed, 60).await {
+    match wallet_manager.solana_client().confirm_transaction(&signature, solana_sdk::commitment_config::CommitmentLevel::Confirmed, 60).await { // Use getter method
         Ok(_) => {
             info!("Buy transaction {} confirmed successfully.", signature);
 
@@ -400,7 +400,7 @@ impl AutoTrader {
             running: Arc::new(RwLock::new(false)),
             config,
             task_handle: Arc::new(Mutex::new(None)),
-        } // This brace closes the Self struct literal
+        }) // Add missing closing brace for Ok(Self { ... })
     } // This brace closes the `new` function
 
     // --- Strategy Management ---

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result}; // Import Context trait
 use dotenv::dotenv;
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -20,6 +20,7 @@ use crate::config::Config;
 use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
 use crate::trading::autotrader::AutoTrader;
+use crate::api::birdeye::BirdeyeClient; // Import BirdeyeClient
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,23 +45,29 @@ async fn main() -> Result<()> {
     let wallet_manager = WalletManager::new(&config.solana_private_key, solana_client.clone(), config.demo_mode)?;
     info!("Wallet initialized with address: {}", wallet_manager.get_public_key());
 
+    // Initialize Birdeye client
+    let birdeye_client = Arc::new(BirdeyeClient::new(
+        config.birdeye_api_key.as_ref().context("BIRDEYE_API_KEY missing")?
+    ));
+    info!("Birdeye client initialized");
+
     // Initialize Telegram bot
     let bot = Bot::new(&config.telegram_bot_token);
 
-    // Initialize AutoTrader (already returns Arc<Self>)
+    // Initialize AutoTrader (now returns Result<Self>)
     let auto_trader = AutoTrader::new(
         wallet_manager.clone(),
         solana_client.clone(),
+        // birdeye_client is initialized inside AutoTrader::new now
         config.clone(), // Pass Arc<Config>
-    );
+    )?; // Handle potential error from AutoTrader::new
     info!("AutoTrader initialized");
 
     // Set up shared state for Teloxide
-    let bot_state = bot::BotState { // Create the state struct directly
-        // auto_trader field expects Arc<Mutex<AutoTrader>>
-        auto_trader: Arc::new(Mutex::new(auto_trader)), // Wrap the AutoTrader instance correctly
+    let bot_state = bot::BotState {
+        auto_trader: Arc::new(Mutex::new(auto_trader)), // AutoTrader is already initialized
         wallet_manager: wallet_manager.clone(),
-        solana_client: solana_client.clone(), // Pass Arc<SolanaClient>
+        solana_client: solana_client.clone(),
         // config field expects Config, not Arc<Config>
         config: (*config).clone(), // Clone the inner Config value from the Arc
         authorized_users: config.authorized_users.clone(), // Clone the Vec<i64>

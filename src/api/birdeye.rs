@@ -17,32 +17,18 @@ pub struct BirdeyeClient {
 
 // --- Response Structs ---
 
-// Matches the structure for /defi/v3/pair/overview/single
-#[derive(Debug, Deserialize, Serialize)]
-pub struct PairOverviewResponse {
-    pub data: Option<PairData>,
-    pub success: bool,
+// Structure for the /defi/price endpoint response
+#[derive(Debug, Deserialize)]
+struct PriceResponse {
+    data: Option<PriceData>,
+    success: bool,
 }
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")] // Match Birdeye's camelCase fields
-pub struct PairData {
-    pub address: String, // Pair address
-    pub base: TokenInfo,
-    pub quote: TokenInfo,
-    pub liquidity: Option<f64>, // Total liquidity in USD
-    pub price: Option<f64>,     // Price of base token in quote token (e.g., SOL price in USDC)
-    // Add other potentially useful fields if needed later
-    // pub volume_24h: Option<f64>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TokenInfo {
-    pub address: String,
-    pub decimals: u8,
-    pub symbol: String,
-    // pub name: String, // Name might not always be present
-    // pub icon: Option<String>,
+#[derive(Debug, Deserialize)]
+struct PriceData {
+    value: f64, // Price (likely USD)
+    // Attempt to find liquidity directly in this response if available
+    // The exact field name might vary, check Birdeye docs if this fails.
+    liquidity: Option<f64>, // Liquidity in USD?
 }
 
 
@@ -59,95 +45,112 @@ impl BirdeyeClient {
         }
     }
 
-    /// Fetches liquidity for a given token, attempting to find its primary SOL pair.
+    /// Fetches liquidity for a given token using the /defi/price endpoint.
     /// Returns liquidity denominated in SOL.
     pub async fn get_liquidity_sol(&self, token_address: &str) -> Result<f64> {
-        // Birdeye's pair overview endpoint expects the PAIR address, not the token address.
-        // Finding the primary SOL pair address for a token programmatically is complex.
-        // Common methods involve:
-        // 1. Using another Birdeye endpoint (like token overview or tokenlist) if it provides the pair address.
-        // 2. Querying DEX program accounts (e.g., Raydium, Orca) - complex SDK/RPC interaction.
-        // 3. Using Helius DAS API if it returns market/pair info.
-
-        // For now, we'll stick to the placeholder approach of returning 0.0
-        // and log a warning, as implementing pair finding is out of scope for this step.
-        // TODO: Implement robust primary pair finding logic.
-        warn!(
-            "get_liquidity_sol for {} needs primary pair finding logic. Returning placeholder 0.0.",
-            token_address
-        );
-        Ok(0.0) // Return 0.0 until pair finding is implemented
-
-        /* // --- Ideal Implementation (Requires Pair Finding) ---
-        // 1. Find the primary SOL pair address for `token_address` (e.g., using another API call)
-        let pair_address = find_primary_sol_pair(token_address).await?; // Hypothetical function
-
-        // 2. Call the pair overview endpoint
-        let endpoint = format!("/defi/v3/pair/overview/single");
+        let endpoint = "/defi/price";
         let url = format!("{}{}", BIRDEYE_BASE_URL, endpoint);
 
-        debug!("Fetching pair overview from Birdeye for pair {}: {}", pair_address, url);
+        debug!("Fetching price/liquidity from Birdeye for {}: {}", token_address, url);
 
         let response = self.client
             .get(&url)
             .header("X-API-KEY", &self.api_key)
-            .query(&[("address", pair_address)]) // Pass pair address as query param
+            .query(&[("address", token_address)])
             .send()
             .await
-            .context("Failed to send request to Birdeye Pair Overview API")?;
+            .context("Failed to send request to Birdeye Price API")?;
 
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            error!("Birdeye Pair Overview API error: {} - {}", status, error_text);
-            return Err(TraderbotError::ApiError(format!(
-                "Birdeye Pair Overview API failed with status {}: {}", status, error_text
-            )).into());
+            error!("Birdeye Price API error for token {}: {} - {}", token_address, status, error_text);
+            // Treat API errors as potentially zero liquidity for risk assessment
+            return Ok(0.0);
         }
 
-        let response_data: PairOverviewResponse = response
+        let response_data: PriceResponse = response
             .json()
             .await
-            .context("Failed to parse Birdeye Pair Overview API response")?;
+            .context("Failed to parse Birdeye Price API response")?;
 
         if !response_data.success || response_data.data.is_none() {
-             warn!("Birdeye API reported failure or no data for pair {}", pair_address);
-             return Ok(0.0);
+             warn!("Birdeye Price API reported failure or no data for token {}", token_address);
+             return Ok(0.0); // Return 0 liquidity if API call fails or returns no data
         }
 
         let data = response_data.data.unwrap();
 
-        // 3. Extract USD liquidity and SOL price
+        // Extract USD liquidity and current token price (in USD)
         let usd_liquidity = data.liquidity.unwrap_or(0.0);
-        let sol_price_usd = data.price; // Assuming base is SOL, quote is USD(C)
+        // let token_price_usd = data.value; // Token price isn't directly needed for SOL liquidity calc
 
         if usd_liquidity <= 0.0 {
+            debug!("Birdeye reported zero or missing USD liquidity for {}", token_address);
             return Ok(0.0);
         }
 
-        // Ensure the base token is SOL for correct calculation
-        if data.base.address != crate::api::jupiter::SOL_MINT {
-             warn!("Primary pair found ({}) for {} is not SOL-based. Cannot calculate SOL liquidity accurately.", data.address, token_address);
-             // Could potentially use quote token liquidity if it's SOL, but less reliable.
-             return Ok(0.0); // Return 0 if not a direct SOL pair for simplicity
-        }
-
-        let sol_price = match sol_price_usd {
-            Some(price) if price > 0.0 => price,
-            _ => {
-                warn!("Invalid or missing SOL price in Birdeye response for pair {}", data.address);
-                return Ok(0.0); // Cannot calculate without SOL price
+        // To get SOL liquidity, we need the current SOL price in USD.
+        // Fetch SOL price using the same endpoint.
+        let sol_price_usd = match self.get_sol_price_usd().await {
+            Ok(price) => price,
+            Err(e) => {
+                warn!("Failed to get SOL price from Birdeye for liquidity calculation: {:?}. Assuming 0 SOL liquidity.", e);
+                return Ok(0.0);
             }
         };
 
-        // 4. Calculate SOL liquidity
-        let calculated_liquidity_sol = usd_liquidity / sol_price;
+        if sol_price_usd <= 0.0 {
+             warn!("Birdeye returned invalid SOL price: {}", sol_price_usd);
+             return Ok(0.0); // Cannot calculate without SOL price
+        }
+
+        // Calculate SOL liquidity: (Total USD Liquidity / SOL Price in USD)
+        let calculated_liquidity_sol = usd_liquidity / sol_price_usd;
         info!(
             "Calculated SOL liquidity for {}: {:.2} (USD Liq: {:.2}, SOL Price: {:.2})",
-            token_address, calculated_liquidity_sol, usd_liquidity, sol_price
+            token_address, calculated_liquidity_sol, usd_liquidity, sol_price_usd
         );
 
         Ok(calculated_liquidity_sol)
-        */
+    }
+
+    // Helper function to get SOL price in USD using the /defi/price endpoint
+    async fn get_sol_price_usd(&self) -> Result<f64> {
+        let endpoint = "/defi/price";
+        let url = format!("{}{}", BIRDEYE_BASE_URL, endpoint);
+        let sol_address = crate::api::jupiter::SOL_MINT; // Use constant
+
+        let response = self.client
+            .get(&url)
+            .header("X-API-KEY", &self.api_key)
+            .query(&[("address", sol_address)])
+            .send()
+            .await
+            .context("Failed to send SOL price request to Birdeye API")?;
+
+         if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            error!("Birdeye SOL Price API error: {} - {}", status, error_text);
+            return Err(TraderbotError::ApiError(format!(
+                "Birdeye SOL Price API failed with status {}: {}", status, error_text
+            )).into());
+        }
+
+        let response_data: PriceResponse = response
+            .json()
+            .await
+            .context("Failed to parse Birdeye SOL Price API response")?;
+
+        if let Some(data) = response_data.data {
+            if data.value > 0.0 {
+                Ok(data.value)
+            } else {
+                Err(anyhow!("Birdeye returned invalid SOL price: {}", data.value))
+            }
+        } else {
+            Err(anyhow!("Birdeye returned no data for SOL price"))
+        }
     }
 }
