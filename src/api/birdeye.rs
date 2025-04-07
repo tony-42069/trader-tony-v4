@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn}; // Removed info
 
 use crate::error::TraderbotError;
 
@@ -17,7 +17,46 @@ pub struct BirdeyeClient {
 
 // --- Response Structs ---
 
-// Structure for the /defi/price endpoint response
+// Structure for the /defi/token_overview endpoint response
+#[derive(Debug, Deserialize, Serialize, Clone)] // Added Serialize and Clone
+pub struct TokenOverviewResponse { // Made pub
+    pub data: Option<TokenOverviewData>, // Made pub
+    pub success: bool, // Made pub
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)] // Added Serialize and Clone
+#[serde(rename_all = "camelCase")]
+pub struct TokenOverviewData { // Made pub
+    // Core Info
+    pub address: String,
+    pub decimals: Option<u8>,
+    pub symbol: Option<String>,
+    pub name: Option<String>,
+    pub logo_uri: Option<String>,
+
+    // Market Data
+    pub price: Option<f64>,     // Price in USD
+    pub mc: Option<f64>,        // Market Cap in USD
+    pub supply: Option<f64>,    // Circulating supply (check Birdeye docs for exact definition)
+    pub liquidity: Option<f64>, // Total liquidity in USD across tracked pairs
+
+    // Volume & Trade Stats (Examples - add more if needed from the full response)
+    pub v24h_usd: Option<f64>, // Volume 24h USD
+    pub v24h_change_percent: Option<f64>,
+    pub trade24h: Option<u64>, // Number of trades 24h
+
+    // Add other potentially useful fields from the full response if needed for LP check later
+    // e.g., fields related to pairs, LP supply, holders if they exist.
+    // For now, keeping it focused on generally useful overview data.
+}
+
+// #[derive(Debug, Deserialize, Serialize)] // Removed - not currently used
+// struct TokenExtensions {
+//     coingeckoId: Option<String>,
+//     // Add other extension fields if needed
+// }
+
+// Structure for the /defi/price endpoint response (used for SOL price)
 #[derive(Debug, Deserialize)]
 struct PriceResponse {
     data: Option<PriceData>,
@@ -26,9 +65,7 @@ struct PriceResponse {
 #[derive(Debug, Deserialize)]
 struct PriceData {
     value: f64, // Price (likely USD)
-    // Attempt to find liquidity directly in this response if available
-    // The exact field name might vary, check Birdeye docs if this fails.
-    liquidity: Option<f64>, // Liquidity in USD?
+    // liquidity field might exist here too, but we only need value for SOL
 }
 
 
@@ -45,13 +82,12 @@ impl BirdeyeClient {
         }
     }
 
-    /// Fetches liquidity for a given token using the /defi/price endpoint.
-    /// Returns liquidity denominated in SOL.
-    pub async fn get_liquidity_sol(&self, token_address: &str) -> Result<f64> {
-        let endpoint = "/defi/price";
+    /// Fetches the full token overview from the /defi/token_overview endpoint.
+    pub async fn get_token_overview(&self, token_address: &str) -> Result<Option<TokenOverviewData>> {
+        let endpoint = "/defi/token_overview";
         let url = format!("{}{}", BIRDEYE_BASE_URL, endpoint);
 
-        debug!("Fetching price/liquidity from Birdeye for {}: {}", token_address, url);
+        debug!("Fetching token overview from Birdeye for {}: {}", token_address, url);
 
         let response = self.client
             .get(&url)
@@ -59,64 +95,40 @@ impl BirdeyeClient {
             .query(&[("address", token_address)])
             .send()
             .await
-            .context("Failed to send request to Birdeye Price API")?;
+            .context("Failed to send request to Birdeye Token Overview API")?;
 
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            error!("Birdeye Price API error for token {}: {} - {}", token_address, status, error_text);
-            // Treat API errors as potentially zero liquidity for risk assessment
-            return Ok(0.0);
+            error!("Birdeye Token Overview API error for token {}: {} - {}", token_address, status, error_text);
+            // Return Ok(None) to indicate data couldn't be fetched due to API error
+            return Ok(None);
         }
 
-        let response_data: PriceResponse = response
-            .json()
-            .await
-            .context("Failed to parse Birdeye Price API response")?;
-
-        if !response_data.success || response_data.data.is_none() {
-             warn!("Birdeye Price API reported failure or no data for token {}", token_address);
-             return Ok(0.0); // Return 0 liquidity if API call fails or returns no data
-        }
-
-        let data = response_data.data.unwrap();
-
-        // Extract USD liquidity and current token price (in USD)
-        let usd_liquidity = data.liquidity.unwrap_or(0.0);
-        // let token_price_usd = data.value; // Token price isn't directly needed for SOL liquidity calc
-
-        if usd_liquidity <= 0.0 {
-            debug!("Birdeye reported zero or missing USD liquidity for {}", token_address);
-            return Ok(0.0);
-        }
-
-        // To get SOL liquidity, we need the current SOL price in USD.
-        // Fetch SOL price using the same endpoint.
-        let sol_price_usd = match self.get_sol_price_usd().await {
-            Ok(price) => price,
+        let response_data: TokenOverviewResponse = match response.json().await {
+            Ok(data) => data,
             Err(e) => {
-                warn!("Failed to get SOL price from Birdeye for liquidity calculation: {:?}. Assuming 0 SOL liquidity.", e);
-                return Ok(0.0);
+                error!("Failed to parse Birdeye Token Overview API response for {}: {:?}", token_address, e);
+                // Return specific error for parsing failure
+                return Err(TraderbotError::ApiError(format!(
+                    "Failed to parse Birdeye Token Overview response for {}: {}", token_address, e
+                )).into());
             }
         };
 
-        if sol_price_usd <= 0.0 {
-             warn!("Birdeye returned invalid SOL price: {}", sol_price_usd);
-             return Ok(0.0); // Cannot calculate without SOL price
+
+        if !response_data.success || response_data.data.is_none() {
+             warn!("Birdeye Token Overview API reported failure or no data for token {}", token_address);
+             return Ok(None); // Return None if API call fails logically or returns no data
         }
 
-        // Calculate SOL liquidity: (Total USD Liquidity / SOL Price in USD)
-        let calculated_liquidity_sol = usd_liquidity / sol_price_usd;
-        info!(
-            "Calculated SOL liquidity for {}: {:.2} (USD Liq: {:.2}, SOL Price: {:.2})",
-            token_address, calculated_liquidity_sol, usd_liquidity, sol_price_usd
-        );
-
-        Ok(calculated_liquidity_sol)
+        // Return the data field directly
+        Ok(response_data.data)
     }
 
-    // Helper function to get SOL price in USD using the /defi/price endpoint
-    async fn get_sol_price_usd(&self) -> Result<f64> {
+    /// Helper function to get SOL price in USD using the /defi/price endpoint.
+    /// Made public in case it's needed elsewhere.
+    pub async fn get_sol_price_usd(&self) -> Result<f64> {
         let endpoint = "/defi/price";
         let url = format!("{}{}", BIRDEYE_BASE_URL, endpoint);
         let sol_address = crate::api::jupiter::SOL_MINT; // Use constant

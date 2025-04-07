@@ -11,10 +11,10 @@ This plan outlines the logical steps for completing the remaining features, prio
 2.  [X] **Implement Accurate PnL Calculation (`position.rs`):** *(Implemented in `manage_positions_cycle` & `close_position`)*
     *   **Why:** Directly depends on real-time prices. Needed for accurate status reporting and exit logic.
     *   **How:** Update `Position` struct and `PositionManager` methods to calculate PnL based on fetched prices.
-3.  [ ] **Implement `execute_sell` Logic:**
+3.  [X] **Implement `execute_sell` Logic:** *(Implemented as `PositionManager::execute_exit`)*
     *   **Why:** The counterpart to `execute_buy`. Needed to close positions based on triggers or commands.
-    *   **How:** Create a function (in `position.rs` or `autotrader.rs`?) using `JupiterClient::swap_token_to_sol` and `WalletManager`. *(Implemented as `PositionManager::execute_exit`)*
-4.  [X] **Verify/Implement V0 Transaction Signing (`wallet.rs` / `jupiter.rs`):** *(Verified Jupiter client, implemented signing in WalletManager)*
+    *   **How:** Create a function (in `position.rs` or `autotrader.rs`?) using `JupiterClient::swap_token_to_sol` and `WalletManager`.
+4.  [X] **Verify/Implement V0 Transaction Signing (`wallet.rs` / `jupiter.rs`):** *(Verified Jupiter client, implemented signing in WalletManager - **NOTE: Signing currently commented out due to E0599**)*
     *   **Why:** Ensure buy/sell swaps use modern `VersionedTransaction`s for reliability.
     *   **How:** Review swap logic, confirm `VersionedTransaction` usage, and add `WalletManager::sign_versioned_transaction` if needed.
 5.  [X] **Implement Transaction Confirmation Tracking (`position.rs` / `autotrader.rs`):** *(Confirmation logic exists in `SolanaClient::confirm_transaction`, integrated into `execute_buy_task` and `execute_exit`)*
@@ -24,7 +24,11 @@ This plan outlines the logical steps for completing the remaining features, prio
 **Phase 2: Enhancing Decision Making & Robustness** (Improve bot intelligence and stability)
 6.  [ ] **Implement Remaining Risk Analysis Checks (`risk.rs`):**
     *   **Why:** Improves automated trading decisions with comprehensive risk assessment.
-    *   **How:** Implement actual logic for `check_liquidity` (using Birdeye - *structure added, impl pending*), `check_lp_tokens_burned`, `check_holder_distribution`, `check_transfer_tax`.
+    *   **How:** Implement actual logic for:
+        - [ ] `check_liquidity` (*Requires primary pair finding*)
+        - [ ] `check_lp_tokens_burned` (*Requires primary pair finding & LP mint logic*)
+        - [X] `check_holder_distribution` (*Implemented using RPC*)
+        - [X] `check_transfer_tax` (*implemented using Token-2022 check*)
 7.  [ ] **Robust Error Handling & Retries (`solana/client.rs`):**
     *   **Why:** Makes RPC interactions less prone to temporary network issues.
     *   **How:** Wrap RPC calls with retry logic (e.g., `tokio-retry`).
@@ -51,10 +55,10 @@ This plan outlines the logical steps for completing the remaining features, prio
 
 ## Core Functionality
 - [ ] **Risk Analysis (`risk.rs`):**
-    - [ ] Implement `check_liquidity` (using Birdeye - *structure added, impl pending*)
-    - [ ] Implement `check_lp_tokens_burned` (find LP, check holders/burn address)
-    - [ ] Implement `check_holder_distribution` (using RPC/Helius)
-    - [ ] Implement `check_transfer_tax` (Token-2022/simulation)
+    - [ ] Implement `check_liquidity` (using DEX APIs/SDKs) - *Requires primary pair finding*
+    - [ ] Implement `check_lp_tokens_burned` (find LP, check holders/burn address) - *Requires primary pair finding & LP mint logic*
+    - [X] Implement `check_holder_distribution` (using RPC/Helius) - *Implemented using RPC*
+    - [X] Implement `check_transfer_tax` (Token-2022/simulation) - *Implemented using Token-2022 check*
     - [X] Implement `check_sellability` simulation (honeypot check) - *Basic simulation added*
     - [X] Implement `check_mint_freeze_authority` - *Implemented using `get_mint_info`*
 - [ ] **Position Management (`position.rs`):**
@@ -66,12 +70,12 @@ This plan outlines the logical steps for completing the remaining features, prio
     - [X] Implement transaction confirmation tracking for buys/sells. *(Logic exists, integrated)*
 - [ ] **AutoTrader Logic (`autotrader.rs`):**
     - [ ] Refactor `scan_for_opportunities` task loop logic (pass Arcs correctly).
-    - [ ] Implement `execute_buy` logic (call Jupiter swap, create position).
+    - [ ] Implement `execute_buy` logic (call Jupiter swap, create position). - *(Partially done in `execute_buy_task`)*
     - [X] Implement `execute_sell` logic (called by `PositionManager` or `AutoTrader`?). *(Implemented as `PositionManager::execute_exit`)*
     - [X] Implement `start`/`stop`/`get_status` functionality fully (incl. task handling). *(Refactored in `autotrader.rs`)*
     - [ ] Implement strategy loading/persistence.
 - [ ] **Solana Integration (`wallet.rs` / `client.rs`):**
-    - [X] Implement correct V0 `VersionedTransaction` signing in `wallet.rs`. *(Implemented)*
+    - [X] Implement correct V0 `VersionedTransaction` signing in `wallet.rs`. *(Implemented but **commented out due to E0599**)*
     - [ ] Add robust error handling and retries for RPC calls in `client.rs`.
     - [X] Implement transaction confirmation logic in `client.rs` or `wallet.rs`. *(Implemented in `SolanaClient`, integrated)*
 - [ ] **Telegram Bot (`commands.rs` / `keyboards.rs`):**

@@ -1,8 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result}; // Import the Context trait
 use solana_client::{
     rpc_client::RpcClient,
-    rpc_config::{RpcSendTransactionConfig, RpcSimulateTransactionConfig, RpcTokenAccountsFilter}, // Added RpcSimulateTransactionConfig, RpcTokenAccountsFilter
-    rpc_response::{RpcSimulateTransactionResult, RpcTokenAccountBalance}, // Added RpcSimulateTransactionResult, RpcTokenAccountBalance
+    rpc_config::{RpcSendTransactionConfig, RpcSimulateTransactionConfig}, // Removed RpcTokenAccountsFilter
+    rpc_response::{RpcSimulateTransactionResult, RpcTokenAccountBalance},
 };
 use solana_sdk::{
     commitment_config::{CommitmentConfig, CommitmentLevel},
@@ -13,8 +13,9 @@ use solana_sdk::{
 };
 use spl_associated_token_account::get_associated_token_address;
 use spl_token::state::{Account as TokenAccount, Mint}; // Renamed Account to TokenAccount
-use std::{str::FromStr, sync::Arc, time::Duration}; // Added Arc, Duration
+use std::{str::FromStr, sync::Arc, time::Duration};
 use tracing::{debug, error, info, warn};
+// Removed duplicate: use anyhow::{Context, Result};
 
 use crate::error::TraderbotError; // Assuming TraderbotError exists
 
@@ -97,9 +98,16 @@ impl SolanaClient {
 
     pub async fn get_token_supply(&self, mint_pubkey: &Pubkey) -> Result<u64> {
         let mint_pubkey_copy = *mint_pubkey;
-        self.run_blocking(move |client| client.get_token_supply(&mint_pubkey_copy))
+        let ui_amount = self
+            .run_blocking(move |client| client.get_token_supply(&mint_pubkey_copy))
             .await
-            .context("Failed to get token supply")
+            .context("Failed to get token supply RPC response")?;
+
+        // Parse the amount string from UiTokenAmount into u64
+        ui_amount.amount.parse::<u64>().context(format!(
+            "Failed to parse token supply amount '{}' into u64",
+            ui_amount.amount
+        ))
     }
 
     pub async fn get_token_largest_accounts(&self, mint_pubkey: &Pubkey) -> Result<Vec<RpcTokenAccountBalance>> {

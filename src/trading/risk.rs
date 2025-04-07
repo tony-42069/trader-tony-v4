@@ -1,21 +1,21 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result}; // Added anyhow
 use serde::{Deserialize, Serialize};
-use solana_sdk::pubkey::Pubkey; // Added Pubkey
-use std::{str::FromStr, sync::Arc}; // Added FromStr
-use tracing::{debug, info, warn}; // Added warn, debug
+use solana_sdk::pubkey::Pubkey;
+use std::{str::FromStr, sync::Arc};
+use tracing::{debug, error, info, warn}; // Added error
 
-use crate::api::birdeye::BirdeyeClient; // Import BirdeyeClient
+use crate::api::birdeye::{BirdeyeClient, TokenOverviewData}; // Import BirdeyeClient and TokenOverviewData
 use crate::api::helius::HeliusClient;
 use crate::api::jupiter::JupiterClient;
 use crate::solana::client::SolanaClient;
 use crate::error::TraderbotError; // Assuming this exists
-use crate::solana::wallet::WalletManager; // Added WalletManager
-use base64::{engine::general_purpose::STANDARD, Engine as _}; // Import Engine trait globally for the file
+use crate::solana::wallet::WalletManager;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use spl_token_2022::{
-    extension::{StateWithExtensions, transfer_fee::TransferFeeConfig},
-    state::Mint as Token2022Mint, // Use alias to avoid conflict with spl_token::state::Mint
+    extension::{BaseStateWithExtensions, StateWithExtensions, transfer_fee::TransferFeeConfig}, // Added BaseStateWithExtensions
+    state::Mint as Token2022Mint,
 };
-use solana_program::program_pack::Pack as TokenPack; // Use alias for Pack trait
+use solana_program::program_pack::Pack as TokenPack;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +70,45 @@ impl RiskAnalyzer {
         let mut risk_score: u32 = 0;
         let mut details = Vec::new();
 
+        // --- Fetch Data Upfront ---
+
+        // Fetch Birdeye overview data once
+        let birdeye_overview = match self.birdeye_client.get_token_overview(token_address_str).await {
+            Ok(Some(data)) => {
+                debug!("Successfully fetched Birdeye overview for {}", token_address_str);
+                Some(data)
+            }
+            Ok(None) => {
+                warn!("Birdeye returned no overview data for {}", token_address_str);
+                details.push("❓ Birdeye returned no overview data.".to_string());
+                None
+            }
+            Err(e) => {
+                error!("Failed to fetch Birdeye overview for {}: {:?}", token_address_str, e);
+                details.push("❓ Error fetching Birdeye overview data.".to_string());
+                None
+            }
+        };
+
+        // Fetch SOL price once (needed for liquidity conversion)
+        let sol_price_usd = match self.birdeye_client.get_sol_price_usd().await {
+             Ok(price) if price > 0.0 => {
+                 debug!("Fetched SOL price: {:.4} USD", price);
+                 Some(price)
+             },
+             Ok(price) => {
+                 warn!("Birdeye returned invalid SOL price: {}", price);
+                 details.push("❓ Birdeye returned invalid SOL price.".to_string());
+                 None
+             }
+             Err(e) => {
+                 error!("Failed to fetch SOL price from Birdeye: {:?}", e);
+                 details.push("❓ Error fetching SOL price.".to_string());
+                 None
+             }
+        };
+
+
         // --- Perform individual checks ---
 
         // 1. Mint & Freeze Authority Check
@@ -97,30 +136,38 @@ impl RiskAnalyzer {
             }
         };
 
-        // 2. Liquidity Check (Using Birdeye)
-        // TODO: Refine BirdeyeClient implementation for accurate SOL liquidity.
-        let liquidity_sol = match self.check_liquidity(&token_pubkey).await { // Call the new function
-            Ok(liq) => liq,
+        // 2. Liquidity Check (Using fetched Birdeye data)
+        let liquidity_sol = match self.check_liquidity(birdeye_overview.as_ref(), sol_price_usd).await {
+            Ok(liq) => {
+                if liq < 5.0 { // Example threshold
+                    risk_score += 20;
+                    details.push(format!("🟠 Low liquidity ({:.2} SOL).", liq));
+                } else {
+                    details.push(format!("✅ Liquidity: {:.2} SOL.", liq));
+                }
+                liq
+            }
             Err(e) => {
-                warn!("Failed to check liquidity for {}: {:?}. Assuming 0.", token_address_str, e);
-                details.push("❓ Failed to check liquidity.".to_string());
+                warn!("Liquidity check failed for {}: {:?}. Assuming 0.", token_address_str, e);
+                details.push(format!("❓ Failed liquidity check: {}", e));
                 0.0 // Assume 0 liquidity on error
             }
         };
-        if liquidity_sol < 5.0 { // Example threshold (adjust based on Birdeye data)
-             risk_score += 20;
-             details.push(format!("🟠 Low liquidity ({:.2} SOL).", liquidity_sol)); // Keep SOL unit for now
-        } else {
-             details.push(format!("✅ Liquidity: {:.2} SOL.", liquidity_sol));
-        }
 
 
-        // 3. LP Token Check (Placeholder)
-        // TODO: Implement actual check using primary pair LP mint address (requires pair finding).
-        let lp_tokens_burned = match self.check_lp_tokens_burned(&token_pubkey).await { // Call renamed function
-             Ok(burned) => burned,
+        // 3. LP Token Check (Placeholder, using fetched Birdeye data)
+        let lp_tokens_burned = match self.check_lp_tokens_burned(birdeye_overview.as_ref()).await {
+             Ok(burned) => {
+                 if !burned {
+                     risk_score += 15;
+                     details.push("🟠 LP tokens may not be burned/locked (Placeholder Check).".to_string());
+                 } else {
+                     details.push("✅ LP tokens appear burned/locked (Placeholder Check).".to_string());
+                 }
+                 burned
+             }
              Err(e) => {
-                 warn!("Failed to check LP token status for {}: {:?}. Assuming not burned.", token_address_str, e);
+                 warn!("LP token check failed for {}: {:?}. Assuming not burned.", token_address_str, e);
                  details.push("❓ Failed to check LP token status.".to_string());
                  false // Assume not burned on error
              }
@@ -222,21 +269,53 @@ impl RiskAnalyzer {
         Ok((has_mint_authority, has_freeze_authority))
     }
 
-    // Checks liquidity using the BirdeyeClient
-    async fn check_liquidity(&self, token_address: &Pubkey) -> Result<f64> {
-        debug!("Checking liquidity via Birdeye for {}", token_address);
-        // Use the Birdeye client to fetch liquidity data
-        // The BirdeyeClient::get_liquidity_sol function currently returns a placeholder.
-        // It needs to be implemented correctly based on Birdeye's API response structure
-        // to extract actual SOL liquidity from the primary pair.
-        self.birdeye_client.get_liquidity_sol(&token_address.to_string()).await
-            .context(format!("Failed to get liquidity from Birdeye for {}", token_address))
+    // Calculates SOL liquidity based on fetched Birdeye data and SOL price
+    async fn check_liquidity(
+        &self,
+        overview_data: Option<&TokenOverviewData>,
+        sol_price_usd: Option<f64>,
+    ) -> Result<f64> {
+        debug!("Calculating SOL liquidity from Birdeye data");
+
+        let overview = overview_data.ok_or_else(|| anyhow!("Birdeye overview data not available"))?;
+        let sol_price = sol_price_usd.ok_or_else(|| anyhow!("SOL price not available"))?;
+
+        let usd_liquidity = overview.liquidity.unwrap_or(0.0);
+
+        if usd_liquidity <= 0.0 {
+            debug!("Birdeye reported zero or missing USD liquidity for {}", overview.address);
+            return Ok(0.0);
+        }
+
+        if sol_price <= 0.0 {
+             warn!("Invalid SOL price ({}) used for liquidity calculation.", sol_price);
+             return Err(anyhow!("Invalid SOL price for calculation"));
+        }
+
+        // Calculate SOL liquidity: (Total USD Liquidity / SOL Price in USD)
+        let calculated_liquidity_sol = usd_liquidity / sol_price;
+        info!(
+            "Calculated SOL liquidity for {}: {:.2} (USD Liq: {:.2}, SOL Price: {:.2})",
+            overview.address, calculated_liquidity_sol, usd_liquidity, sol_price
+        );
+
+        Ok(calculated_liquidity_sol)
     }
 
-    async fn check_lp_tokens_burned(&self, token_address: &Pubkey) -> Result<bool> { // Renamed function
+    // Placeholder for LP token check, now accepts overview data
+    async fn check_lp_tokens_burned(
+        &self,
+        overview_data: Option<&TokenOverviewData>,
+    ) -> Result<bool> {
+        let token_address = overview_data.map(|d| d.address.as_str()).unwrap_or("unknown token");
+        debug!("LP Burn Check Placeholder for {}", token_address);
+
         // TODO: Implement actual LP token burn/lock check. This is complex.
+        // Use overview_data if it contains relevant fields (e.g., pair address, LP mint).
+        // Example: if let Some(pair_addr) = overview_data.and_then(|d| d.primary_pair_address) { ... }
+
         // Step 1: Find the primary SOL liquidity pool address for the token.
-        //      - Method A: Use Birdeye token overview endpoint (if available and provides pair address).
+        //      - Method A: Use Birdeye token overview endpoint (check overview_data).
         //      - Method B: Use Helius DAS API (if it includes market/pair data).
         //      - Method C: Query DEX program accounts (e.g., Raydium, Orca) - requires SDKs or complex RPC parsing.
         //      - Method D: Use a hardcoded list or external service mapping tokens to pairs.
@@ -270,7 +349,6 @@ impl RiskAnalyzer {
         // Step 7: Return true if burned/locked, false otherwise.
 
         // --- Current Placeholder Logic ---
-        debug!("LP Burn Check Placeholder for {}", token_address);
         Ok(rand::random::<f64>() > 0.2) // 80% chance LP tokens are "burned" in placeholder
     }
 
@@ -452,11 +530,22 @@ impl RiskAnalyzer {
         let top_n = 10;
         let mut top_n_amount: u64 = 0;
         for account in largest_accounts.iter().take(top_n) {
-             // The amount field is already in lamports (u64)
-             top_n_amount += account.amount;
+             // Access the 'amount' string field within the UiTokenAmount struct and parse it.
+             match account.amount.amount.parse::<u64>() { // Access account.amount.amount
+                 Ok(amount_u64) => top_n_amount += amount_u64,
+                 Err(e) => {
+                     // Format the ui_amount_string for the warning message
+                     warn!("Failed to parse largest account amount '{}' for {}: {}. Skipping.", account.amount.ui_amount_string, token_address, e);
+                     // Optionally return an error or just skip this account
+                 }
+             }
         }
 
-        let concentration_percent = (top_n_amount as f64 / total_supply as f64) * 100.0;
+        let concentration_percent = if total_supply > 0 {
+             (top_n_amount as f64 / total_supply as f64) * 100.0
+        } else {
+             0.0 // Avoid division by zero if total supply is 0
+        };
         debug!("Top {} holders concentration for {}: {:.2}%", top_n, token_address, concentration_percent);
 
         Ok((holder_count_estimate, concentration_percent))
@@ -487,9 +576,10 @@ impl RiskAnalyzer {
                         Ok(transfer_fee_config) => {
                             // 5. Extract fee basis points and calculate percentage
                             // Fee is charged on the destination amount. Get the highest fee.
-                            let fee_basis_points = transfer_fee_config.get_epoch_fee(0).transfer_fee_basis_points; // Check current epoch fee
-                            let tax_percent = fee_basis_points as f64 / 100.0;
-                            info!("Token {} has Token-2022 transfer tax: {}% ({} basis points)", token_address, tax_percent, fee_basis_points);
+                            let fee_basis_points_pod = transfer_fee_config.get_epoch_fee(0).transfer_fee_basis_points; // Check current epoch fee
+                            let fee_basis_points: u16 = fee_basis_points_pod.into(); // Convert PodU16 to u16
+                            let tax_percent = fee_basis_points as f64 / 100.0; // Cast u16 to f64
+                            info!("Token {} has Token-2022 transfer tax: {}% ({} basis points)", token_address, tax_percent, fee_basis_points); // Format u16
                             Ok(tax_percent)
                         }
                         Err(_) => {
@@ -514,50 +604,3 @@ impl RiskAnalyzer {
         // TODO: Consider adding simulation for non-Token-2022 tokens as a fallback (Step 5 in original TODO)
     }
 }
-
-</final_file_content>
-
-IMPORTANT: For any future changes to this file, use the final_file_content shown above as your reference. This content reflects the current state of the file, including any auto-formatting (e.g., if you used single quotes but the formatter converted them to double quotes). Always base your SEARCH/REPLACE operations on this final version to ensure accuracy.
-
-<environment_details>
-# VSCode Visible Files
-src/trading/risk.rs
-
-# VSCode Open Tabs
-.env
-src/config.rs
-src/api/mod.rs
-TODO.md
-src/trading/risk.rs
-src/solana/client.rs
-src/api/birdeye.rs
-src/trading/autotrader.rs
-src/main.rs
-src/solana/wallet.rs
-src/api/helius.rs
-src/api/jupiter.rs
-.gitignore
-src/error.rs
-src/bot/mod.rs
-src/models/mod.rs
-src/models/token.rs
-src/models/user.rs
-src/solana/mod.rs
-src/trading/mod.rs
-src/trading/strategy.rs
-README.md
-deployment.md
-strategy.md
-src/bot/commands.rs
-src/trading/position.rs
-api.md
-.env.example
-Cargo.toml
-src/bot/keyboards.rs
-
-# Current Time
-4/7/2025, 4:46:00 PM (America/New_York, UTC-4:00)
-
-# Current Mode
-ACT MODE
-</environment_details>

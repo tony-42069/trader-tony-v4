@@ -6,7 +6,7 @@ use solana_sdk::{
     transaction::{Transaction, VersionedTransaction}, // Added VersionedTransaction
 };
 use std::sync::Arc;
-use tracing::{debug, error, info, warn}; // Added warn, debug
+use tracing::{error, info, warn}; // Removed unused debug
 
 use crate::solana::client::SolanaClient;
 use crate::error::TraderbotError; // Assuming TraderbotError exists
