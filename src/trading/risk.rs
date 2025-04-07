@@ -216,11 +216,23 @@ impl RiskAnalyzer {
     }
 
 
-    async fn check_lp_tokens_burned_placeholder(&self, _token_address: &Pubkey) -> Result<bool> {
-        // TODO: Find the main LP pair (e.g., TOKEN/SOL on Raydium). Get the LP mint address.
-        // Check the largest holders of the LP mint. If a significant portion (>90%?) is in a known burn address (e.g., 1111..), return true.
-        warn!("LP token burn check is using placeholder data.");
-        Ok(rand::random::<f64>() > 0.2) // 80% chance LP tokens are "burned"
+    async fn check_lp_tokens_burned_placeholder(&self, token_address: &Pubkey) -> Result<bool> {
+        warn!("LP token burn check is using placeholder data and needs full implementation.");
+        // TODO: Implement actual LP token burn/lock check.
+        // Steps:
+        // 1. Find the primary liquidity pool address for the token (e.g., TOKEN/SOL).
+        //    - This might require querying an external API (Helius get_token_metadata, Birdeye, Jupiter strict list)
+        //    - Or finding the pool associated with the token mint via Raydium/Orca SDKs/APIs.
+        // 2. Get the LP token mint address associated with that pool.
+        // 3. Use `solana_client.get_token_supply(&lp_mint_pubkey)` to get total supply.
+        // 4. Use `solana_client.get_token_largest_accounts(&lp_mint_pubkey)` to get top holders.
+        // 5. Check if a known burn address (e.g., 11111111111111111111111111111111) holds >95% of the supply.
+        // 6. Alternatively/Additionally, check if significant amounts are held by known locker contract addresses.
+        // 7. Return true if burned/locked, false otherwise.
+
+        // Placeholder logic:
+        debug!("LP Burn Check Placeholder for {}", token_address);
+        Ok(rand::random::<f64>() > 0.2) // 80% chance LP tokens are "burned" in placeholder
     }
 
     // Checks if a token can likely be sold by simulating a small buy then sell
@@ -364,23 +376,45 @@ impl RiskAnalyzer {
         }
     }
 
-    async fn check_holder_distribution_placeholder(&self, _token_address: &Pubkey) -> Result<(u32, f64)> {
-        // TODO: Use RPC `getTokenLargestAccounts` or Helius/Birdeye API.
-        // Calculate total supply and percentage held by top N accounts.
-        warn!("Holder distribution check is using placeholder data.");
-        let holder_count = 50 + rand::random::<u32>() % 1000;
-        let concentration_percent = rand::random::<f64>() * 60.0; // 0-60% concentration
+    async fn check_holder_distribution_placeholder(&self, token_address: &Pubkey) -> Result<(u32, f64)> {
+        warn!("Holder distribution check is using placeholder data and needs full implementation.");
+        // TODO: Implement actual holder distribution check.
+        // Steps:
+        // 1. Get total supply using `solana_client.get_token_supply(token_address)`.
+        // 2. Get largest token accounts using `solana_client.get_token_largest_accounts(token_address)`.
+        //    - This returns a Vec<RpcTokenAccountBalance> which includes `ui_amount_string`.
+        // 3. Calculate the total amount held by the top N (e.g., top 10) holders.
+        //    - Need to parse `ui_amount_string` to f64/u64, considering decimals.
+        // 4. Calculate the concentration percentage: (top_N_amount / total_supply) * 100.
+        // 5. Estimate total holder count (this is difficult via RPC, might need Helius/Birdeye).
+        //    - Helius DAS API might provide holder count directly in asset metadata.
+        //    - Alternatively, estimate based on the number of accounts returned by `getTokenLargestAccounts` if it returns more than N.
+
+        // Placeholder logic:
+        debug!("Holder Distribution Check Placeholder for {}", token_address);
+        let holder_count = 50 + rand::random::<u32>() % 1000; // Random: 50-1049 holders
+        let concentration_percent = rand::random::<f64>() * 60.0; // Random: 0-60% concentration
         Ok((holder_count, concentration_percent))
     }
 
-    async fn check_transfer_tax_placeholder(&self, _token_address: &Pubkey) -> Result<f64> {
-        // TODO: Check for Token-2022 extensions or simulate a transfer between two owned wallets
-        // and compare input/output amounts.
-        warn!("Transfer tax check is using placeholder data.");
-        if rand::random::<f64>() < 0.1 { // 10% chance of having tax
-            Ok(rand::random::<f64>() * 15.0) // 0-15% tax
+    async fn check_transfer_tax_placeholder(&self, token_address: &Pubkey) -> Result<f64> {
+        warn!("Transfer tax check is using placeholder data and needs full implementation.");
+        // TODO: Implement actual transfer tax check.
+        // Steps:
+        // 1. Check if the token mint is associated with the Token-2022 program.
+        // 2. If it is, fetch mint account data and parse extensions using `spl_token_2022::extension::StateWithExtensions::unpack`.
+        // 3. Look for the `TransferFeeConfig` extension.
+        // 4. If found, extract the transfer fee basis points and calculate the percentage.
+        // 5. If not Token-2022 or no extension found, potentially simulate a small transfer between two temporary wallets
+        //    owned by the bot's keypair to observe any fee deduction (more complex).
+        // 6. Return the calculated tax percentage (or 0.0 if none detected).
+
+        // Placeholder logic:
+        debug!("Transfer Tax Check Placeholder for {}", token_address);
+        if rand::random::<f64>() < 0.1 { // 10% chance of having tax in placeholder
+            Ok(rand::random::<f64>() * 15.0) // Random: 0-15% tax
         } else {
-            Ok(0.0)
+            Ok(0.0) // Assume 0 tax otherwise
         }
     }
 }

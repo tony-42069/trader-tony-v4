@@ -115,49 +115,90 @@ impl PositionManager {
 
     // --- Persistence ---
 
+    // Loads positions from the JSON file into the in-memory HashMap.
     async fn load_positions(&self) -> Result<()> {
+        // Ensure the data directory exists, create if not.
+        if let Some(dir) = self.persistence_path.parent() {
+            if !dir.exists() {
+                info!("Data directory not found, creating at: {:?}", dir);
+                fs::create_dir_all(dir).await.context("Failed to create data directory")?;
+            }
+        }
+
+        // Check if the positions file exists. If not, it's okay, start fresh.
         if !self.persistence_path.exists() {
-            info!("Positions file not found at {:?}, starting fresh.", self.persistence_path);
+            info!("Positions file not found at {:?}, starting with empty state.", self.persistence_path);
             return Ok(());
         }
 
         info!("Loading positions from {:?}...", self.persistence_path);
-        let data = fs::read_to_string(&self.persistence_path).await
-            .context(format!("Failed to read positions file: {:?}", self.persistence_path))?;
+        let data = match fs::read_to_string(&self.persistence_path).await {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                 info!("Positions file not found (race condition?), starting fresh.");
+                 return Ok(());
+            }
+            Err(e) => {
+                return Err(e).context(format!("Failed to read positions file: {:?}", self.persistence_path));
+            }
+        };
+
 
         if data.trim().is_empty() {
              info!("Positions file is empty.");
              return Ok(());
         }
 
-        let loaded_positions: Vec<Position> = serde_json::from_str(&data)
-            .context("Failed to deserialize positions data")?;
+        // Deserialize from JSON into a Vec<Position>
+        let loaded_positions: Vec<Position> = match serde_json::from_str(&data) {
+             Ok(p) => p,
+             Err(e) => {
+                  error!("Failed to deserialize positions data from {:?}: {}. Starting with empty state.", self.persistence_path, e);
+                  // Optionally back up the corrupted file here
+                  return Ok(()); // Don't crash, just start fresh
+             }
+        };
 
+        // Populate the in-memory HashMap
         let mut positions_map = self.positions.write().await;
         positions_map.clear(); // Clear existing in-memory positions first
         for pos in loaded_positions {
+            // Filter out positions that shouldn't be loaded (e.g., already closed/failed long ago?)
+            // For now, load all states. Consider filtering later if needed.
             positions_map.insert(pos.id.clone(), pos);
         }
         info!("Loaded {} positions from file.", positions_map.len());
         Ok(())
     }
 
+    // Saves the current in-memory positions HashMap to the JSON file.
     async fn save_positions(&self) -> Result<()> {
-        debug!("Saving positions...");
+        debug!("Saving positions state...");
         let positions_map = self.positions.read().await;
-        let positions_vec: Vec<Position> = positions_map.values().cloned().collect();
+        // No need to filter here, save the complete current state
+        let positions_vec: Vec<&Position> = positions_map.values().collect(); // Collect references
 
         // Ensure the directory exists
         if let Some(dir) = self.persistence_path.parent() {
+             // No need to check existence again if load_positions already did,
+             // but create_dir_all is idempotent.
             fs::create_dir_all(dir).await.context("Failed to create data directory")?;
         }
 
+        // Serialize Vec<&Position> to JSON string
         let data = serde_json::to_string_pretty(&positions_vec)
             .context("Failed to serialize positions")?;
 
-        fs::write(&self.persistence_path, data).await
-            .context(format!("Failed to write positions file: {:?}", self.persistence_path))?;
-        debug!("Saved {} positions to file.", positions_vec.len());
+        // Write data to the file atomically (optional but safer)
+        // Using a temporary file and rename can prevent data loss if write fails mid-way.
+        let temp_path = self.persistence_path.with_extension("json.tmp");
+        fs::write(&temp_path, data).await
+            .context(format!("Failed to write temporary positions file: {:?}", temp_path))?;
+        fs::rename(&temp_path, &self.persistence_path).await
+             .context(format!("Failed to rename temporary positions file to {:?}", self.persistence_path))?;
+
+
+        debug!("Saved {} positions to file: {:?}", positions_vec.len(), self.persistence_path);
         Ok(())
     }
 
@@ -535,62 +576,106 @@ impl PositionManager {
 
         debug!("Managing {} active positions...", active_ids.len());
 
-        let mut updates = HashMap::new();
-        let mut exits = Vec::new();
+        let mut exits_to_execute = Vec::new();
 
-        // --- Step 1: Fetch current prices ---
-        // TODO: Batch price fetching if possible
-        for position_id in &active_ids {
-             let position = match self.get_position(position_id).await { // Re-fetch position (might have changed)
-                 Some(p) if p.status == PositionStatus::Active => p,
-                 _ => continue, // Skip if no longer active or not found
-             };
+        // Process each active position individually to avoid holding lock for too long
+        for position_id in active_ids {
+            let mut current_price_sol_opt: Option<f64> = None;
+            let mut position_snapshot: Option<Position> = None; // To hold position data outside lock
 
-            if position.is_demo {
-                // Simulate price movement for demo positions
-                let mut rng = rand::thread_rng();
-                let price_change_factor = rng.gen_range(0.97..1.03); // -3% to +3% change
-                let new_price = position.current_price_sol * price_change_factor;
-                updates.insert(position.id.clone(), new_price);
-            } else {
-                // Fetch real price
-                match self.jupiter_client.get_price(
-                    &crate::api::jupiter::SOL_MINT.to_string(), // Price relative to SOL
-                    &position.token_address,
-                    position.token_decimals
-                ).await {
-                    Ok(price) => {
-                        updates.insert(position.id.clone(), price);
+            // --- Step 1: Get Position & Fetch Price ---
+            { // Scope for read lock
+                let positions_map = self.positions.read().await;
+                if let Some(position) = positions_map.get(&position_id) {
+                    // Only process active positions
+                    if position.status != PositionStatus::Active {
+                        continue;
                     }
-                    Err(e) => {
-                        warn!("Failed to get price for {}: {:?}. Skipping update.", position.token_symbol, e);
-                        // Consider marking position as potentially problematic?
+                    position_snapshot = Some(position.clone()); // Clone data needed outside lock
+                } else {
+                    warn!("Position {} disappeared during management cycle?", position_id);
+                    continue; // Position removed between getting IDs and now
+                }
+            } // Read lock released here
+
+            if let Some(ref position) = position_snapshot {
+                if position.is_demo {
+                    // Simulate price movement for demo positions
+                    let mut rng = rand::thread_rng();
+                    let price_change_factor = rng.gen_range(0.97..1.03); // -3% to +3% change
+                    current_price_sol_opt = Some(position.current_price_sol * price_change_factor);
+                    debug!("[DEMO] Position {}: Simulated price update to {}", position.id, current_price_sol_opt.unwrap());
+                } else {
+                    // Fetch real price for non-demo positions
+                    match self.jupiter_client.get_price(
+                        &crate::api::jupiter::SOL_MINT.to_string(), // Price relative to SOL
+                        &position.token_address,
+                        position.token_decimals
+                    ).await {
+                        Ok(price) => {
+                            current_price_sol_opt = Some(price);
+                            debug!("Position {}: Fetched price {:.6}", position.id, price);
+                        }
+                        Err(e) => {
+                            warn!("Failed to get price for position {} ({}): {:?}. Skipping update.", position.id, position.token_symbol, e);
+                            // Consider adding retry logic or temporary error state?
+                        }
                     }
                 }
             }
-        }
 
-        // --- Step 2: Update positions and check exit conditions ---
-        for (position_id, new_price) in updates {
-            match self.update_and_check_position(&position_id, new_price).await {
-                Ok(Some(exit_reason)) => {
-                    // Exit condition met, add to exit queue
-                    exits.push((position_id, exit_reason));
-                }
-                Ok(None) => {
-                    // Price updated, no exit needed yet
-                }
-                Err(e) => {
-                    error!("Error updating/checking position {}: {:?}", position_id, e);
-                }
+            // --- Step 2: Update Position & Check Exit Conditions ---
+            if let (Some(current_price_sol), Some(position)) = (current_price_sol_opt, position_snapshot) {
+                 // Re-acquire write lock briefly to update and check
+                 let mut exit_reason_opt: Option<PositionStatus> = None;
+                 { // Scope for write lock
+                     let mut positions_map = self.positions.write().await;
+                     if let Some(pos_mut) = positions_map.get_mut(&position_id) {
+                         // Ensure it's still active before updating
+                         if pos_mut.status == PositionStatus::Active {
+                             pos_mut.current_price_sol = current_price_sol;
+                             // Recalculate PnL (optional here, can be done just before closing)
+                             pos_mut.pnl_sol = Some(pos_mut.entry_token_amount * current_price_sol - pos_mut.entry_value_sol);
+                             if pos_mut.entry_value_sol > 0.0 {
+                                 pos_mut.pnl_percent = Some(pos_mut.pnl_sol.unwrap_or(0.0) / pos_mut.entry_value_sol * 100.0);
+                             }
+
+                             // Update highest price and trailing stop
+                             if current_price_sol > pos_mut.highest_price {
+                                 pos_mut.highest_price = current_price_sol;
+                                 if let Some(ts_percent) = pos_mut.trailing_stop_percent {
+                                     let new_trailing_stop = current_price_sol * (1.0 - (ts_percent as f64 / 100.0));
+                                     if pos_mut.trailing_stop_price.map_or(true, |current_ts| new_trailing_stop > current_ts) {
+                                         debug!("Updating trailing stop for {}: {:.6} -> {:.6}", pos_mut.token_symbol, pos_mut.trailing_stop_price.unwrap_or(0.0), new_trailing_stop);
+                                         pos_mut.trailing_stop_price = Some(new_trailing_stop);
+                                     }
+                                 }
+                             }
+                             // Check exit conditions based on the updated state
+                             exit_reason_opt = self.check_exit_conditions_internal(pos_mut);
+                             if exit_reason_opt.is_some() {
+                                 pos_mut.status = PositionStatus::Closing; // Mark for exit
+                                 info!("Position {} marked for closing due to: {:?}", position_id, exit_reason_opt.as_ref().unwrap());
+                             }
+                         } else {
+                              debug!("Position {} status changed to {} before update could be applied.", position_id, pos_mut.status);
+                         }
+                     }
+                 } // Write lock released
+
+                 // If an exit condition was met, add to the list for execution
+                 if let Some(exit_reason) = exit_reason_opt {
+                     exits_to_execute.push((position_id.clone(), exit_reason));
+                 }
             }
-        }
+        } // End loop through active_ids
 
-        // --- Step 3: Execute exits ---
-        for (position_id, exit_reason) in exits {
+
+        // --- Step 3: Execute Exits ---
+        for (position_id, exit_reason) in exits_to_execute { // Use the collected exits
              // Re-fetch position to ensure it's still marked for closing and get latest state
              let position_to_exit = match self.get_position(&position_id).await {
-                 Some(p) if p.status == PositionStatus::Closing => p,
+                 Some(p) if p.status == PositionStatus::Closing => p, // Ensure it's still marked for closing
                  Some(p) => {
                      warn!("Position {} status changed ({}) before exit could be executed. Skipping exit.", position_id, p.status);
                      continue; // Status changed, maybe closed by another process/manual action
