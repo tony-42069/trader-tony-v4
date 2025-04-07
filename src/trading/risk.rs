@@ -8,6 +8,9 @@ use crate::api::helius::HeliusClient;
 use crate::api::jupiter::JupiterClient;
 use crate::solana::client::SolanaClient;
 use crate::error::TraderbotError; // Assuming this exists
+use crate::solana::wallet::WalletManager; // Added WalletManager
+use base64::{engine::general_purpose::STANDARD, Engine as _}; // Import Engine trait globally for the file
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskAnalysis {
@@ -24,11 +27,13 @@ pub struct RiskAnalysis {
     pub concentration_percent: f64,       // Percentage held by top N holders
 }
 
+
 #[derive(Clone)] // Removed Debug
 pub struct RiskAnalyzer {
     solana_client: Arc<SolanaClient>,
     helius_client: Arc<HeliusClient>, // Use Arc if shared
     jupiter_client: Arc<JupiterClient>, // Use Arc if shared
+    wallet_manager: Arc<WalletManager>, // Added WalletManager
 }
 
 impl RiskAnalyzer {
@@ -36,10 +41,12 @@ impl RiskAnalyzer {
         solana_client: Arc<SolanaClient>,
         helius_client: Arc<HeliusClient>,
         jupiter_client: Arc<JupiterClient>,
+        wallet_manager: Arc<WalletManager>, // Added WalletManager
     ) -> Self {
         Self {
             solana_client,
             helius_client,
+            wallet_manager, // Added WalletManager
             jupiter_client,
         }
     }
@@ -107,7 +114,7 @@ impl RiskAnalyzer {
         // 4. Sellability Check (Honeypot - Placeholder)
         // TODO: Implement simulation of a small buy followed by a sell.
         //       This requires careful handling of temporary accounts and potential costs.
-        let can_sell = self.check_sellability_placeholder(&token_pubkey).await?;
+        let can_sell = self.check_sellability_placeholder(&token_pubkey, &mut details).await?; // Pass details mutably
         if !can_sell {
             risk_score = 100; // CRITICAL RISK - Honeypot
             details.push("🔴 Honeypot detected (failed sell simulation).".to_string());
@@ -181,11 +188,33 @@ impl RiskAnalyzer {
         Ok((has_mint_authority, has_freeze_authority))
     }
 
-    async fn check_liquidity_placeholder(&self, _token_address: &Pubkey) -> Result<f64> {
-        // TODO: Implement actual liquidity check using DEX APIs or RPC calls to pool accounts.
-        warn!("Liquidity check is using placeholder data.");
-        Ok(10.0 + rand::random::<f64>() * 90.0) // Random liquidity between 10 and 100 SOL
+    // Attempt to get liquidity info - Placeholder, needs refinement
+    async fn check_liquidity_placeholder(&self, token_address: &Pubkey) -> Result<f64> {
+        warn!("Liquidity check is using placeholder data and Jupiter price check as a proxy.");
+        // TODO: Implement actual liquidity check using DEX APIs (e.g., Raydium SDK, Orca SDK)
+        //       or dedicated market data APIs (Birdeye, DexScreener).
+        //       This requires finding the primary liquidity pool (e.g., TOKEN/SOL).
+
+        // As a very rough proxy, check if we can get a price quote from Jupiter.
+        // This doesn't measure liquidity depth, only if a route exists.
+        match self.jupiter_client.get_price(
+            &crate::api::jupiter::SOL_MINT.to_string(), // Price vs SOL
+            &token_address.to_string(),
+            9 // Assume 9 decimals for price check, might need actual decimals
+        ).await {
+            Ok(_price) => {
+                // If we get a price, assume some minimal liquidity exists for now.
+                // Return a placeholder value. A real implementation needs pool data.
+                debug!("Got price quote for {}, assuming placeholder liquidity.", token_address);
+                Ok(10.0) // Placeholder value indicating some liquidity
+            }
+            Err(e) => {
+                warn!("Failed to get price quote for {} (potential low/no liquidity): {:?}", token_address, e);
+                Ok(0.0) // Assume 0 liquidity if price check fails
+            }
+        }
     }
+
 
     async fn check_lp_tokens_burned_placeholder(&self, _token_address: &Pubkey) -> Result<bool> {
         // TODO: Find the main LP pair (e.g., TOKEN/SOL on Raydium). Get the LP mint address.
@@ -194,16 +223,145 @@ impl RiskAnalyzer {
         Ok(rand::random::<f64>() > 0.2) // 80% chance LP tokens are "burned"
     }
 
-    async fn check_sellability_placeholder(&self, _token_address: &Pubkey) -> Result<bool> {
-        // TODO: Implement simulation:
-        // 1. Get quote for small SOL -> TOKEN buy.
-        // 2. Get swap transaction.
-        // 3. Simulate the buy transaction. If fails, return false.
-        // 4. Get quote for small TOKEN -> SOL sell (using estimated output from buy).
-        // 5. Get swap transaction for sell.
-        // 6. Simulate the sell transaction. If fails, return false.
-        warn!("Sellability check (honeypot) is using placeholder data.");
-        Ok(rand::random::<f64>() > 0.05) // 95% chance token is "sellable"
+    // Checks if a token can likely be sold by simulating a small buy then sell
+    async fn check_sellability_placeholder(&self, token_address: &Pubkey, details: &mut Vec<String>) -> Result<bool> {
+        warn!("Sellability check (honeypot) is using placeholder simulation logic.");
+        // TODO: Refine simulation amounts, error handling, and potentially use a temporary wallet.
+
+        let wallet_pubkey = self.wallet_manager.get_public_key();
+        let token_address_str = token_address.to_string();
+        let sol_mint_str = crate::api::jupiter::SOL_MINT.to_string();
+
+
+        // --- Simulate Buy ---
+        // 1. Get Buy Quote (Small amount, e.g., 0.001 SOL)
+        let buy_amount_lamports = 1_000_000; // 0.001 SOL
+        let buy_quote = match self.jupiter_client.get_quote(
+            &sol_mint_str,
+            &token_address_str,
+            buy_amount_lamports,
+            100 // 1% slippage for simulation
+        ).await {
+            Ok(q) => q,
+            Err(e) => {
+                warn!("Sellability Check: Failed to get buy quote for {}: {:?}", token_address_str, e);
+                return Ok(false); // Cannot buy, assume not sellable for safety
+            }
+        };
+
+        // Estimate amount of token we would receive
+        let estimated_token_out = match buy_quote.out_amount.parse::<u64>() {
+             Ok(amount) if amount > 0 => amount,
+             _ => {
+                 warn!("Sellability Check: Invalid estimated token output amount in buy quote for {}.", token_address_str);
+                 return Ok(false); // Invalid quote
+             }
+        };
+
+
+        // 2. Get Buy Swap Transaction
+        let buy_swap_response = match self.jupiter_client.get_swap_transaction(
+            &buy_quote,
+            &wallet_pubkey.to_string(),
+            None // No priority fee for simulation
+        ).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                 warn!("Sellability Check: Failed to get buy swap tx for {}: {:?}", token_address_str, e);
+                 return Ok(false);
+            }
+        };
+
+        // 3. Decode and Simulate Buy Transaction
+        let buy_tx_bytes = match STANDARD.decode(&buy_swap_response.swap_transaction) {
+             Ok(bytes) => bytes,
+             Err(e) => {
+                 warn!("Sellability Check: Failed to decode buy tx for {}: {:?}", token_address_str, e);
+                 return Ok(false);
+             }
+        };
+         let buy_versioned_tx: solana_sdk::transaction::VersionedTransaction = match bincode::deserialize(&buy_tx_bytes) {
+             Ok(tx) => tx,
+             Err(e) => {
+                  warn!("Sellability Check: Failed to deserialize buy tx for {}: {:?}", token_address_str, e);
+                  return Ok(false);
+             }
+         };
+
+        // We don't strictly need the buy simulation to succeed, only the sell.
+        // But logging the failure is useful.
+        if let Err(e) = self.solana_client.simulate_versioned_transaction(&buy_versioned_tx).await {
+             warn!("Sellability Check: Buy simulation failed for {}: {:?}", token_address_str, e);
+             // Don't return false here, proceed to sell check.
+             details.push(format!("⚠️ Buy simulation failed ({}).", e)); // Add detail
+        } else {
+             debug!("Sellability Check: Buy simulation successful for {}.", token_address_str);
+        }
+
+
+        // --- Simulate Sell ---
+        // 4. Get Sell Quote (Selling the estimated amount received from buy)
+        // Need token decimals for this quote
+        let token_decimals = match self.solana_client.get_mint_info(token_address).await {
+             Ok(info) => info.decimals,
+             Err(e) => {
+                 warn!("Sellability Check: Failed to get decimals for {}: {:?}. Cannot simulate sell.", token_address_str, e);
+                 return Ok(false); // Cannot proceed without decimals
+             }
+        };
+
+        let sell_quote = match self.jupiter_client.get_quote(
+            &token_address_str,
+            &sol_mint_str,
+            estimated_token_out, // Sell the amount we simulated buying
+            100 // 1% slippage
+        ).await {
+             Ok(q) => q,
+             Err(e) => {
+                 warn!("Sellability Check: Failed to get sell quote for {}: {:?}", token_address_str, e);
+                 return Ok(false); // If we can't get a sell quote, assume not sellable
+             }
+        };
+
+        // 5. Get Sell Swap Transaction
+         let sell_swap_response = match self.jupiter_client.get_swap_transaction(
+            &sell_quote,
+            &wallet_pubkey.to_string(),
+            None
+        ).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                 warn!("Sellability Check: Failed to get sell swap tx for {}: {:?}", token_address_str, e);
+                 return Ok(false);
+            }
+        };
+
+        // 6. Decode and Simulate Sell Transaction
+         let sell_tx_bytes = match STANDARD.decode(&sell_swap_response.swap_transaction) {
+             Ok(bytes) => bytes,
+             Err(e) => {
+                 warn!("Sellability Check: Failed to decode sell tx for {}: {:?}", token_address_str, e);
+                 return Ok(false);
+             }
+        };
+         let sell_versioned_tx: solana_sdk::transaction::VersionedTransaction = match bincode::deserialize(&sell_tx_bytes) {
+             Ok(tx) => tx,
+             Err(e) => {
+                  warn!("Sellability Check: Failed to deserialize sell tx for {}: {:?}", token_address_str, e);
+                  return Ok(false);
+             }
+         };
+
+        match self.solana_client.simulate_versioned_transaction(&sell_versioned_tx).await {
+            Ok(_) => {
+                debug!("Sellability Check: Sell simulation successful for {}.", token_address_str);
+                Ok(true) // Both buy (optional) and sell simulations succeeded
+            }
+            Err(e) => {
+                warn!("Sellability Check: Sell simulation FAILED for {}: {:?}", token_address_str, e);
+                Ok(false) // Sell simulation failed - potential honeypot
+            }
+        }
     }
 
     async fn check_holder_distribution_placeholder(&self, _token_address: &Pubkey) -> Result<(u32, f64)> {

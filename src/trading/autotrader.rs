@@ -47,6 +47,7 @@ impl AutoTrader {
             solana_client.clone(),
             helius_client.clone(),
             jupiter_client.clone(),
+            wallet_manager.clone(), // Pass WalletManager to RiskAnalyzer::new
         ));
         let position_manager = Arc::new(PositionManager::new(
             wallet_manager.clone(),
