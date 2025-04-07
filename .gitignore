@@ -1,0 +1,16 @@
+# Environment variables
+.env
+
+# Build artifacts
+/target/
+
+# IDE/Editor specific files
+.vscode/
+.idea/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Data files (like positions) - consider if this should be tracked
+/data/
