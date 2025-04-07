@@ -64,7 +64,8 @@ async fn main() -> Result<()> {
         config: (*config).clone(), // Clone the inner Config value from the Arc
         authorized_users: config.authorized_users.clone(), // Clone the Vec<i64>
     };
-    // Teloxide's dptree::deps! macro will automatically wrap bot_state in Arc for sharing
+    // Explicitly wrap bot_state in Arc<Mutex<>> for the handler
+    let bot_state_dependency = Arc::new(Mutex::new(bot_state));
 
     // Start the bot
     info!("Starting TraderTony V4 bot...");
@@ -73,9 +74,10 @@ async fn main() -> Result<()> {
             .filter_command::<Command>()
             .endpoint(command_handler),
     );
-    
+
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![bot_state])
+        // Provide the correctly wrapped state to the dispatcher
+        .dependencies(dptree::deps![bot_state_dependency])
         .enable_ctrlc_handler()
         .build()
         .dispatch()
