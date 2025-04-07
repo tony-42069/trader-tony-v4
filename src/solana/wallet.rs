@@ -1,11 +1,10 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use solana_sdk::{
-    commitment_config::CommitmentLevel, // Added
     pubkey::Pubkey,
     signature::{Keypair, Signature, Signer}, // Added Signature
     transaction::{Transaction, VersionedTransaction}, // Added VersionedTransaction
 };
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 use tracing::{debug, error, info, warn}; // Added warn, debug
 
 use crate::solana::client::SolanaClient;
@@ -91,7 +90,7 @@ impl WalletManager {
     pub async fn sign_and_send_versioned_transaction(
         &self,
         mut transaction: VersionedTransaction, // Take ownership
-        last_valid_block_height: u64, // Required for confirmation
+        _last_valid_block_height: u64, // Prefixed as unused (blockhash fetched internally)
     ) -> Result<Signature> {
         if self.demo_mode {
             info!("[DEMO MODE] Simulating transaction send for pubkey: {}", self.get_public_key());

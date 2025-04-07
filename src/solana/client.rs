@@ -1,16 +1,15 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use solana_client::{
     rpc_client::RpcClient,
-    rpc_config::{RpcAccountInfoConfig, RpcSendTransactionConfig, RpcSimulateTransactionConfig}, // Added RpcSimulateTransactionConfig
-    rpc_response::{RpcResult, RpcSimulateTransactionResult}, // Added RpcSimulateTransactionResult
+    rpc_config::{RpcSendTransactionConfig, RpcSimulateTransactionConfig}, // Added RpcSimulateTransactionConfig
+    rpc_response::RpcSimulateTransactionResult, // Added RpcSimulateTransactionResult
 };
 use solana_sdk::{
-    account::Account as SolanaAccount, // Alias to avoid conflict with spl_token::state::Account
     commitment_config::{CommitmentConfig, CommitmentLevel},
     program_pack::Pack,
     pubkey::Pubkey,
     signature::Signature,
-    transaction::{Transaction, VersionedTransaction}, // Added VersionedTransaction
+    transaction::VersionedTransaction, // Added VersionedTransaction
 };
 use spl_associated_token_account::get_associated_token_address;
 use spl_token::state::{Account as TokenAccount, Mint}; // Renamed Account to TokenAccount
@@ -148,7 +147,7 @@ impl SolanaClient {
     pub async fn confirm_transaction(
         &self,
         signature: &Signature,
-        commitment: CommitmentLevel,
+        _commitment: CommitmentLevel, // Prefixed as it's not directly used in current logic
         timeout_secs: u64,
     ) -> Result<()> {
         let start_time = std::time::Instant::now();

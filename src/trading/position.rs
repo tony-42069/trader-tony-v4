@@ -11,7 +11,7 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::api::jupiter::{JupiterClient, SwapResult};
+use crate::api::jupiter::JupiterClient;
 use crate::config::Config;
 use crate::error::TraderbotError;
 use crate::solana::client::SolanaClient;
@@ -174,7 +174,7 @@ impl PositionManager {
         strategy_id: &str,
         entry_value_sol: f64,
         entry_token_amount: f64,
-        price_impact_pct: f64, // Included for potential logging/analysis
+        _price_impact_pct: f64, // Prefixed as unused
         entry_tx_sig: &str,
         stop_loss_percent: Option<u32>,
         take_profit_percent: Option<u32>,

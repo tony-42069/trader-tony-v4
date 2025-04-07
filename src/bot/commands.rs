@@ -1,8 +1,6 @@
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::{
-    InlineKeyboardButton, InlineKeyboardMarkup, ParseMode,
-};
+use teloxide::types::ParseMode;
 use teloxide::utils::command::BotCommands;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn}; // Added warn
@@ -10,6 +8,7 @@ use tracing::{error, info, warn}; // Added warn
 use crate::bot::keyboards; // Assuming keyboards module exists for callbacks
 use crate::bot::BotState;
 use crate::trading::strategy::Strategy; // Assuming Strategy struct exists
+use teloxide::utils::markdown::escape; // Use teloxide's built-in escape function
 
 #[derive(BotCommands, Clone, Debug)] // Added Debug
 #[command(rename_rule = "lowercase", description = "Available commands:")]
@@ -81,9 +80,10 @@ pub async fn command_handler(
                 if locked_state.config.demo_mode { "🧪 DEMO" } else { "🔴 REAL" },
                 locked_state.wallet_manager.get_public_key(),
             );
-            
-            bot.send_message(chat_id, welcome_message)
-                .parse_mode(ParseMode::Markdown)
+
+            // Use MarkdownV2 and escape the message
+            bot.send_message(chat_id, escape(&welcome_message))
+                .parse_mode(ParseMode::MarkdownV2) // Use MarkdownV2
                 .reply_markup(keyboards::main_menu()) // Use keyboard from keyboards module
                 .await?;
         },
@@ -103,8 +103,9 @@ pub async fn command_handler(
                         locked_state.wallet_manager.get_public_key(),
                         balance
                     );
-                    bot.send_message(chat_id, balance_message)
-                        .parse_mode(ParseMode::Markdown)
+                     // Use MarkdownV2 and escape the message
+                    bot.send_message(chat_id, escape(&balance_message))
+                        .parse_mode(ParseMode::MarkdownV2) // Use MarkdownV2
                         .await?;
                 }
                 Err(e) => {
@@ -125,9 +126,10 @@ pub async fn command_handler(
                 if running { "✅ Running" } else { "⏹️ Stopped" },
                 if locked_state.config.demo_mode { "🧪 DEMO" } else { "🔴 REAL" }
             );
-            
-            bot.send_message(chat_id, status_message)
-                .parse_mode(ParseMode::Markdown)
+
+             // Use MarkdownV2 and escape the message
+            bot.send_message(chat_id, escape(&status_message))
+                .parse_mode(ParseMode::MarkdownV2) // Use MarkdownV2
                 .reply_markup(keyboards::autotrader_menu(running)) // Use keyboard
                 .await?;
         },
@@ -142,9 +144,10 @@ pub async fn command_handler(
                  // Format strategies... (implementation omitted for brevity)
                  "Existing strategies:\n- Strategy 1\n- Strategy 2".to_string() // Placeholder
             };
-            
-            bot.send_message(chat_id, strategies_message)
-                .parse_mode(ParseMode::Markdown)
+
+             // Use MarkdownV2 and escape the message
+            bot.send_message(chat_id, escape(&strategies_message))
+                .parse_mode(ParseMode::MarkdownV2) // Use MarkdownV2
                 .reply_markup(keyboards::strategy_menu()) // Use keyboard
                 .await?;
         },
@@ -159,17 +162,19 @@ pub async fn command_handler(
                 // Format positions... (implementation omitted)
                 "Active positions:\n- Position A\n- Position B".to_string() // Placeholder
             };
-            
-            bot.send_message(chat_id, positions_message)
-                .parse_mode(ParseMode::Markdown)
+
+             // Use MarkdownV2 and escape the message
+            bot.send_message(chat_id, escape(&positions_message))
+                .parse_mode(ParseMode::MarkdownV2) // Use MarkdownV2
                 .reply_markup(keyboards::positions_menu()) // Use keyboard
                 .await?;
         },
         Command::Analyze { token_address } => {
             bot.send_message(
                 chat_id,
-                format!("🔍 Analyzing token: `{}`\nPlease wait...", token_address)
-            ).parse_mode(ParseMode::Markdown).await?;
+                 // Use MarkdownV2 and escape the message (note: backticks are fine in V2)
+                escape(&format!("🔍 Analyzing token: `{}`\nPlease wait...", token_address))
+            ).parse_mode(ParseMode::MarkdownV2).await?; // Use MarkdownV2
 
             // Need RiskAnalyzer and analyze_token implementation
             // let analysis_result = locked_state.auto_trader.lock().await.risk_analyzer.analyze_token(&token_address).await; // Example lock
@@ -178,10 +183,12 @@ pub async fn command_handler(
             match analysis_result {
                 Ok(_analysis) => {
                     // Format analysis... (implementation omitted)
-                    let analysis_message = format!("Analysis results for `{}`:\nRisk: Medium\nLiquidity: Good", token_address); // Placeholder
-                    
-                    bot.send_message(chat_id, analysis_message)
-                        .parse_mode(ParseMode::Markdown)
+                    // Placeholder - format properly with MarkdownV2 escaping if needed
+                    let analysis_message = format!("Analysis results for `{}`:\nRisk: Medium\nLiquidity: Good", token_address);
+
+                    // Use MarkdownV2 and escape the message
+                    bot.send_message(chat_id, escape(&analysis_message))
+                        .parse_mode(ParseMode::MarkdownV2) // Use MarkdownV2
                         // Add keyboard for actions like Snipe?
                         .await?;
                 },
@@ -189,8 +196,9 @@ pub async fn command_handler(
                     error!("Error analyzing token {}: {:?}", token_address, e);
                     bot.send_message(
                         chat_id,
-                        format!("❌ Error analyzing token `{}`.", token_address)
-                    ).parse_mode(ParseMode::Markdown).await?;
+                         // Use MarkdownV2 and escape the message
+                        escape(&format!("❌ Error analyzing token `{}`.", token_address))
+                    ).parse_mode(ParseMode::MarkdownV2).await?; // Use MarkdownV2
                 }
             }
         },
@@ -220,9 +228,10 @@ pub async fn command_handler(
             
             bot.send_message(
                 chat_id,
-                format!("🎯 Preparing to snipe token: `{}` with {:.6} SOL...", token_address, amount)
-            ).parse_mode(ParseMode::Markdown).await?;
-            
+                 // Use MarkdownV2 and escape the message
+                escape(&format!("🎯 Preparing to snipe token: `{}` with {:.6} SOL...", token_address, amount))
+            ).parse_mode(ParseMode::MarkdownV2).await?; // Use MarkdownV2
+
             // TODO: Implement actual snipe logic within AutoTrader or a dedicated service
             // 1. Analyze token (reuse Analyze logic or parts of it)
             // 2. Check risk level against strategy/config
@@ -234,17 +243,19 @@ pub async fn command_handler(
 
             match snipe_result {
                  Ok(_) => {
+                     // Use MarkdownV2 and escape the message
                      bot.send_message(
                         chat_id,
-                        format!("✅ Successfully sniped `{}` with {:.6} SOL!", token_address, amount)
-                    ).parse_mode(ParseMode::Markdown).await?;
+                        escape(&format!("✅ Successfully sniped `{}` with {:.6} SOL!", token_address, amount))
+                    ).parse_mode(ParseMode::MarkdownV2).await?; // Use MarkdownV2
                  }
                  Err(e) => {
                      error!("Snipe failed for token {}: {:?}", token_address, e);
+                      // Use MarkdownV2 and escape the message
                      bot.send_message(
                         chat_id,
-                        format!("❌ Snipe failed for token `{}`.", token_address)
-                    ).parse_mode(ParseMode::Markdown).await?;
+                        escape(&format!("❌ Snipe failed for token `{}`.", token_address))
+                    ).parse_mode(ParseMode::MarkdownV2).await?; // Use MarkdownV2
                  }
             }
         },

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey; // Added Pubkey
 use std::{str::FromStr, sync::Arc}; // Added FromStr
-use tracing::{debug, error, info, warn}; // Added warn, debug
+use tracing::{debug, info, warn}; // Added warn, debug
 
 use crate::api::helius::HeliusClient;
 use crate::api::jupiter::JupiterClient;

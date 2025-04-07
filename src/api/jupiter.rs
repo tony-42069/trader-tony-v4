@@ -1,12 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use solana_sdk::{
-    pubkey::Pubkey,
-    transaction::Transaction,
-};
 use std::{
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -411,7 +406,7 @@ impl JupiterClient {
         output_token_decimals: u8,
     ) -> Result<f64> {
         // Quote for buying 1 unit of the output token
-        let amount_out_lamports = 10u64.pow(output_token_decimals as u32);
+        let _amount_out_lamports = 10u64.pow(output_token_decimals as u32); // Prefixed with _
 
         // Need to use /quote with swapMode=ExactOut, but that requires amount specified for output
         // Let's try quoting a small amount of input token instead for an approximate price.

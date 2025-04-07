@@ -13,10 +13,10 @@ use crate::config::Config;
 use crate::models::token::TokenMetadata;
 use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
-use crate::trading::position::{Position, PositionManager, PositionStatus}; // Assuming these exist
+use crate::trading::position::{PositionManager, PositionStatus}; // Assuming these exist
 use crate::trading::risk::{RiskAnalysis, RiskAnalyzer}; // Assuming these exist
 use crate::trading::strategy::Strategy; // Assuming this exists
-use crate::error::TraderbotError; // Assuming this exists
+ // Assuming this exists
 
 // Removed Clone derive, manual implementation was problematic
 // Removed Debug derive as SolanaClient doesn't implement it

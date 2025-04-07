@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tracing::{debug, error, info};
 
 use crate::models::token::TokenMetadata;
@@ -133,6 +133,7 @@ pub struct DasLinks {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[allow(non_snake_case)] // Allow non-snake-case fields for this struct mapping to API
 pub struct SearchAssetsRequest {
     pub ownerAddress: Option<String>,
     pub creatorAddress: Option<String>,
