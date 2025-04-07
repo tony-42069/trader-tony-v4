@@ -11,6 +11,11 @@ use crate::solana::client::SolanaClient;
 use crate::error::TraderbotError; // Assuming this exists
 use crate::solana::wallet::WalletManager; // Added WalletManager
 use base64::{engine::general_purpose::STANDARD, Engine as _}; // Import Engine trait globally for the file
+use spl_token_2022::{
+    extension::{StateWithExtensions, transfer_fee::TransferFeeConfig},
+    state::Mint as Token2022Mint, // Use alias to avoid conflict with spl_token::state::Mint
+};
+use solana_program::program_pack::Pack as TokenPack; // Use alias for Pack trait
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,24 +464,54 @@ impl RiskAnalyzer {
     }
 
     async fn check_transfer_tax(&self, token_address: &Pubkey) -> Result<f64> { // Renamed function
-        warn!("Transfer tax check is using placeholder data and needs full implementation.");
-        // TODO: Implement actual transfer tax check.
-        // Steps:
-        // 1. Check if the token mint is associated with the Token-2022 program.
-        // 2. If it is, fetch mint account data and parse extensions using `spl_token_2022::extension::StateWithExtensions::unpack`.
-        // 3. Look for the `TransferFeeConfig` extension.
-        // 4. If found, extract the transfer fee basis points and calculate the percentage.
-        // 5. If not Token-2022 or no extension found, potentially simulate a small transfer between two temporary wallets
-        //    owned by the bot's keypair to observe any fee deduction (more complex).
-        // 6. Return the calculated tax percentage (or 0.0 if none detected).
+        debug!("Checking transfer tax for {}", token_address);
 
-        // Placeholder logic:
-        debug!("Transfer Tax Check Placeholder for {}", token_address);
-        if rand::random::<f64>() < 0.1 { // 10% chance of having tax in placeholder
-            Ok(rand::random::<f64>() * 15.0) // Random: 0-15% tax
+        // 1. Fetch mint account data
+        let mint_account = match self.solana_client.get_rpc().get_account(token_address) {
+             Ok(account) => account,
+             Err(e) => {
+                 warn!("Failed to get mint account for tax check {}: {:?}", token_address, e);
+                 // If we can't get the account, assume no tax, but log error
+                 return Ok(0.0);
+             }
+        };
+
+        // 2. Check if the owner is the Token-2022 program
+        if mint_account.owner == spl_token_2022::id() {
+            debug!("Token {} belongs to Token-2022 program. Checking for transfer fee extension.", token_address);
+            // 3. Try to unpack account data with extensions
+            match StateWithExtensions::<Token2022Mint>::unpack(&mint_account.data) {
+                Ok(mint_state) => {
+                    // 4. Look for the TransferFeeConfig extension
+                    match mint_state.get_extension::<TransferFeeConfig>() {
+                        Ok(transfer_fee_config) => {
+                            // 5. Extract fee basis points and calculate percentage
+                            // Fee is charged on the destination amount. Get the highest fee.
+                            let fee_basis_points = transfer_fee_config.get_epoch_fee(0).transfer_fee_basis_points; // Check current epoch fee
+                            let tax_percent = fee_basis_points as f64 / 100.0;
+                            info!("Token {} has Token-2022 transfer tax: {}% ({} basis points)", token_address, tax_percent, fee_basis_points);
+                            Ok(tax_percent)
+                        }
+                        Err(_) => {
+                            // Extension not found
+                            debug!("Token {} is Token-2022 but has no TransferFeeConfig extension.", token_address);
+                            Ok(0.0)
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to unpack Token-2022 mint extensions for {}: {:?}. Assuming no tax.", token_address, e);
+                    Ok(0.0)
+                }
+            }
+        } else if mint_account.owner == spl_token::id() {
+             debug!("Token {} belongs to standard SPL Token program. Assuming no transfer tax.", token_address);
+             Ok(0.0)
         } else {
-            Ok(0.0) // Assume 0 tax otherwise
+             warn!("Token {} has an unknown owner program: {}. Cannot determine transfer tax.", token_address, mint_account.owner);
+             Ok(0.0) // Assume no tax for unknown programs
         }
+        // TODO: Consider adding simulation for non-Token-2022 tokens as a fallback (Step 5 in original TODO)
     }
 }
 
