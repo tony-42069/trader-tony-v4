@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Context, Result}; // Added Context
 use chrono::Utc; // Added Utc
 use rand; // Added rand explicitly
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, str::FromStr, sync::Arc}; // Added FromStr
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn}; // Added debug
@@ -16,7 +15,332 @@ use crate::solana::wallet::WalletManager;
 use crate::trading::position::{PositionManager, PositionStatus}; // Assuming these exist
 use crate::trading::risk::{RiskAnalysis, RiskAnalyzer}; // Assuming these exist
 use crate::trading::strategy::Strategy; // Assuming this exists
-use crate::error::TraderbotError; // Assuming this exists
+// Removed: use crate::error::TraderbotError;
+
+
+// --- Standalone Task Functions ---
+
+/// The main cycle executed by the background task.
+async fn run_scan_cycle(
+    strategies_arc: Arc<RwLock<HashMap<String, Strategy>>>,
+    helius_client: Arc<HeliusClient>,
+    risk_analyzer: Arc<RiskAnalyzer>,
+    position_manager: Arc<PositionManager>,
+    config: Arc<Config>,
+    wallet_manager: Arc<WalletManager>,
+    jupiter_client: Arc<JupiterClient>,
+    // solana_client is implicitly used by risk_analyzer/position_manager/wallet_manager
+) -> Result<()> {
+    debug!("Scanning for trading opportunities...");
+
+    let strategies_guard = strategies_arc.read().await;
+    let enabled_strategies: Vec<_> = strategies_guard
+        .values()
+        .filter(|s| s.enabled)
+        .cloned()
+        .collect();
+    drop(strategies_guard); // Release read lock
+
+    if enabled_strategies.is_empty() {
+        debug!("No enabled strategies found. Skipping scan.");
+        return Ok(());
+    }
+
+    if config.demo_mode {
+        run_simulated_scan_cycle(&enabled_strategies, &position_manager, &config).await?;
+        return Ok(());
+    }
+
+    // --- Real Mode Scan ---
+    info!("Scanning for new tokens using Helius...");
+    match helius_client.get_recent_tokens(60).await { // TODO: Make age configurable
+        Ok(tokens) => {
+            if tokens.is_empty() {
+                debug!("No new tokens found in this scan cycle.");
+                return Ok(());
+            }
+            info!("Found {} potential new tokens via Helius.", tokens.len());
+
+            for token in tokens {
+                debug!("Processing potential token: {} ({})", token.name, token.address);
+                match risk_analyzer.analyze_token(&token.address).await {
+                    Ok(risk_analysis) => {
+                        info!(
+                            "Analyzed token {}: Risk Level {}, Liquidity {:.2} SOL, Holders {}",
+                            token.symbol, risk_analysis.risk_level, risk_analysis.liquidity_sol, risk_analysis.holder_count
+                        );
+
+                        for strategy in &enabled_strategies {
+                            if meets_strategy_criteria(&token, &risk_analysis, strategy) {
+                                info!("Token {} meets criteria for strategy '{}'", token.symbol, strategy.name);
+                                if should_execute_buy_task(&token, strategy, &position_manager).await? { // Added ? for error handling
+                                    match execute_buy_task(
+                                        &token,
+                                        strategy,
+                                        &position_manager,
+                                        &jupiter_client,
+                                        &wallet_manager, // Pass WalletManager which holds SolanaClient
+                                        &config,
+                                    ).await {
+                                        Ok(_) => info!("Successfully executed buy and confirmed for {} via strategy '{}'", token.symbol, strategy.name),
+                                        Err(e) => error!("Failed to execute buy for {}: {:?}", token.symbol, e), // Error includes confirmation failure now
+                                    }
+                                } else {
+                                     debug!("Buy condition not met for token {} and strategy '{}'", token.symbol, strategy.name);
+                                }
+                            } else {
+                                 debug!("Token {} does not meet criteria for strategy '{}'", token.symbol, strategy.name);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to analyze token {}: {:?}", token.address, e);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            error!("Error fetching recent tokens from Helius: {:?}", e);
+            // Don't return error, just log and continue scan next time
+        }
+    }
+    Ok(())
+}
+
+/// Simulates the scanning process in demo mode.
+async fn run_simulated_scan_cycle(
+    enabled_strategies: &[Strategy],
+    position_manager: &PositionManager, // Pass Arc<PositionManager>
+    _config: &Config, // Pass Arc<Config> - Prefixed as unused for now
+) -> Result<()> {
+    info!("[DEMO MODE] Simulating scan for opportunities...");
+    // Simulate finding a token occasionally
+    if rand::random::<f64>() < 0.1 { // 10% chance per scan cycle
+        let demo_token_addr = format!("DemoMint{}", rand::random::<u32>());
+        let demo_token = TokenMetadata {
+            address: demo_token_addr.clone(),
+            name: format!("Demo Token {}", rand::random::<u16>()),
+            symbol: format!("DEMO{}", rand::random::<u16>()),
+            decimals: 9,
+            supply: Some(1_000_000_000 * 10u64.pow(9)), // Example supply
+            logo_uri: None,
+            creation_time: Some(Utc::now()),
+        };
+        info!("[DEMO MODE] Simulated finding token: {} ({})", demo_token.name, demo_token.symbol);
+
+        // Simulate analysis
+        let risk_analysis = RiskAnalysis {
+             token_address: demo_token_addr,
+             risk_level: rand::random::<u32>() % 101, // 0-100
+             liquidity_sol: (rand::random::<f64>() * 50.0) + 5.0, // 5-55 SOL
+             holder_count: (rand::random::<u32>() % 500) + 10, // 10-509 holders
+             has_mint_authority: rand::random::<bool>(),
+             has_freeze_authority: rand::random::<bool>(),
+             lp_tokens_burned: rand::random::<bool>(),
+             transfer_tax_percent: if rand::random::<f64>() < 0.1 { rand::random::<f64>() * 10.0 } else { 0.0 },
+             can_sell: rand::random::<f64>() > 0.1, // 90% chance can sell
+             concentration_percent: rand::random::<f64>() * 50.0, // 0-50%
+             details: vec!["Simulated analysis".to_string()],
+        };
+         info!("[DEMO MODE] Simulated analysis for {}: Risk {}, Liquidity {:.2}", demo_token.symbol, risk_analysis.risk_level, risk_analysis.liquidity_sol);
+
+
+        for strategy in enabled_strategies {
+            if meets_strategy_criteria(&demo_token, &risk_analysis, strategy) {
+                info!("[DEMO MODE] Token {} meets criteria for strategy '{}'", demo_token.symbol, strategy.name);
+                 if should_execute_buy_task(&demo_token, strategy, position_manager).await? {
+                     info!("[DEMO MODE] Executing simulated buy for {} via strategy '{}'", demo_token.symbol, strategy.name);
+                     // In demo, just log, maybe create a demo position entry
+                     if let Err(e) = position_manager.create_demo_position(
+                         &demo_token.address,
+                         &demo_token.name,
+                         &demo_token.symbol,
+                         &strategy.id,
+                         strategy.max_position_size_sol, // Use strategy defined size
+                     ).await {
+                         error!("[DEMO MODE] Error creating demo position: {}", e);
+                     }
+                 }
+            }
+        }
+    } else {
+         debug!("[DEMO MODE] No simulated token found this cycle.");
+    }
+    Ok(())
+}
+
+/// Checks if a token meets the criteria defined by a strategy based on risk analysis.
+fn meets_strategy_criteria(
+    token: &TokenMetadata,
+    risk_analysis: &RiskAnalysis,
+    strategy: &Strategy,
+) -> bool {
+    if risk_analysis.risk_level > strategy.max_risk_level {
+        debug!("Token {} rejected by strategy '{}': Risk level {} > {}", token.symbol, strategy.name, risk_analysis.risk_level, strategy.max_risk_level);
+        return false;
+    }
+    if risk_analysis.liquidity_sol < strategy.min_liquidity_sol as f64 {
+         debug!("Token {} rejected by strategy '{}': Liquidity {:.2} < {}", token.symbol, strategy.name, risk_analysis.liquidity_sol, strategy.min_liquidity_sol);
+        return false;
+    }
+    if let Some(creation_time) = token.creation_time {
+        let age_minutes = Utc::now().signed_duration_since(creation_time).num_minutes();
+        if age_minutes > 0 && age_minutes as u32 > strategy.max_token_age_minutes { // Check age > 0 to avoid issues with clock sync
+             debug!("Token {} rejected by strategy '{}': Age {} mins > {}", token.symbol, strategy.name, age_minutes, strategy.max_token_age_minutes);
+            return false;
+        }
+    } else {
+         // If creation time is unknown, maybe reject or allow based on strategy config?
+         // For now, allow if creation time is None.
+         debug!("Token {} accepted by strategy '{}': Creation time unknown.", token.symbol, strategy.name);
+    }
+    if risk_analysis.holder_count < strategy.min_holders {
+         debug!("Token {} rejected by strategy '{}': Holders {} < {}", token.symbol, strategy.name, risk_analysis.holder_count, strategy.min_holders);
+        return false;
+    }
+    // Add more checks based on RiskAnalysis fields (mint/freeze authority, tax, etc.) if needed
+    if !risk_analysis.can_sell && strategy.require_can_sell {
+         debug!("Token {} rejected by strategy '{}': Cannot sell and strategy requires it", token.symbol, strategy.name);
+        return false;
+    }
+    if risk_analysis.has_freeze_authority && strategy.reject_if_freeze_authority {
+         debug!("Token {} rejected by strategy '{}': Has freeze authority and strategy rejects it", token.symbol, strategy.name);
+        return false;
+    }
+    // ... other checks
+
+    true
+}
+
+/// Checks if a buy should be executed based on strategy limits and existing positions.
+async fn should_execute_buy_task(
+    token: &TokenMetadata,
+    strategy: &Strategy,
+    position_manager: &PositionManager, // Pass Arc<PositionManager>
+) -> Result<bool> { // Return Result
+    // Check if already holding this token (across all strategies or just this one?)
+    // Let's check across all active positions for simplicity first.
+    if position_manager.has_active_position(&token.address).await {
+        debug!("Skipping buy for {}: Already have an active position.", token.symbol);
+        return Ok(false);
+    }
+
+    // Check strategy-specific limits (concurrent positions, budget)
+    let strategy_positions = position_manager.get_active_positions_by_strategy(&strategy.id).await;
+
+    if strategy_positions.len() >= strategy.max_concurrent_positions as usize {
+        info!("Skipping buy for {}: Max concurrent positions ({}) reached for strategy '{}'.",
+             token.symbol, strategy.max_concurrent_positions, strategy.name);
+        return Ok(false);
+    }
+
+    let used_budget: f64 = strategy_positions.iter().map(|p| p.entry_value_sol).sum(); // Use entry value
+    let position_size = strategy.max_position_size_sol; // Determine intended size first
+    let remaining_budget = strategy.total_budget_sol - used_budget;
+
+    if position_size > remaining_budget {
+        warn!("Skipping buy for {}: Required size {:.4} SOL exceeds remaining budget {:.4} SOL for strategy '{}'.",
+             token.symbol, position_size, remaining_budget, strategy.name);
+        return Ok(false);
+    }
+
+    // Check overall wallet balance? Maybe not here, rely on swap failing if insufficient.
+
+    Ok(true)
+}
+
+/// Executes the buy swap via Jupiter, confirms the transaction, and creates a position entry.
+async fn execute_buy_task(
+    token: &TokenMetadata,
+    strategy: &Strategy,
+    position_manager: &PositionManager, // Pass Arc<PositionManager>
+    jupiter_client: &JupiterClient, // Pass Arc<JupiterClient>
+    wallet_manager: &WalletManager, // Pass Arc<WalletManager> (holds SolanaClient)
+    config: &Config, // Pass Arc<Config>
+) -> Result<SwapResult> { // Return SwapResult
+    info!(
+        "Executing buy for token {} ({}) using strategy '{}'",
+        token.symbol, token.address, strategy.name
+    );
+
+    // Determine position size based on strategy (consider risk adjustment?)
+    let position_size_sol = strategy.max_position_size_sol; // Simple for now
+    // TODO: Add risk-adjusted position sizing?
+    // position_size_sol = position_size_sol * risk_adjustment_factor;
+
+    // Ensure position size is not zero or negative
+    if position_size_sol <= 0.0 {
+        return Err(anyhow!("Calculated position size is zero or negative for token {}", token.symbol));
+    }
+
+    // Fetch token decimals if not already known (needed for Jupiter swap)
+    // Assuming TokenMetadata now includes decimals correctly populated by Helius/RiskAnalyzer
+    let token_decimals = token.decimals;
+
+    // --- Execute Swap ---
+    let swap_result = jupiter_client.swap_sol_to_token(
+        &token.address,
+        token_decimals,
+        position_size_sol,
+        strategy.slippage_bps.unwrap_or(config.default_slippage_bps), // Use strategy slippage or default
+        strategy.priority_fee_micro_lamports.or(Some(config.default_priority_fee_micro_lamports)), // Use strategy priority fee or default
+        wallet_manager.clone().into(), // Convert &WalletManager to Arc<WalletManager>
+    ).await.context(format!("Failed to execute SOL to {} swap", token.symbol))?;
+
+    info!(
+        "Buy swap sent for {}. Signature: {}, Estimated Out: {:.6}",
+        token.symbol, swap_result.transaction_signature, swap_result.out_amount_ui
+    );
+
+    // --- Confirm Transaction ---
+    info!("Confirming buy transaction: {}", swap_result.transaction_signature);
+    let signature = solana_sdk::signature::Signature::from_str(&swap_result.transaction_signature)
+        .context("Failed to parse buy transaction signature")?;
+
+    // Use the SolanaClient from WalletManager to confirm
+    // TODO: Make confirmation timeout configurable
+    match wallet_manager.solana_client.confirm_transaction(&signature, solana_sdk::commitment_config::CommitmentLevel::Confirmed, 60).await {
+        Ok(_) => {
+            info!("Buy transaction {} confirmed successfully.", signature);
+
+            // --- Create Position Entry (Only after confirmation) ---
+            // TODO: Get actual out amount after confirmation if possible (requires parsing tx details)
+            let actual_out_amount = swap_result.actual_out_amount_ui.unwrap_or(swap_result.out_amount_ui); // Use estimate for now
+
+            position_manager.create_position(
+                &token.address,
+                &token.name,
+                &token.symbol,
+                token.decimals,
+                &strategy.id,
+                position_size_sol, // Entry value in SOL
+                actual_out_amount, // Amount of token received
+                swap_result.price_impact_pct,
+                &swap_result.transaction_signature,
+                // Pass SL/TP/Trailing settings from strategy
+                strategy.stop_loss_percent,
+                strategy.take_profit_percent,
+                strategy.trailing_stop_percent,
+                strategy.max_hold_time_minutes,
+            ).await.context("Failed to create position entry after successful swap confirmation")?;
+
+            info!(
+                "Position created for {} ({}) with {:.4} SOL entry value.",
+                token.name, token.symbol, position_size_sol
+            );
+
+            // TODO: Send notification (Telegram?)
+
+            Ok(swap_result) // Return original swap result on success
+        }
+        Err(e) => {
+            error!("Failed to confirm buy transaction {}: {:?}", signature, e);
+            // Don't create a position if confirmation fails
+            Err(e).context(format!("Buy transaction {} failed confirmation", signature))
+        }
+    }
+}
+
 
 // Removed Clone derive, manual implementation was problematic
 // Removed Debug derive as SolanaClient doesn't implement it
@@ -131,7 +455,7 @@ impl AutoTrader {
         let wallet_manager = self.wallet_manager.clone();
         let jupiter_client = self.jupiter_client.clone();
         // Need solana_client too for RiskAnalyzer/PositionManager potentially
-        let solana_client = self.solana_client.clone();
+        let _solana_client = self.solana_client.clone(); // Prefixed as unused for now
 
 
         let handle = tokio::spawn(async move {
@@ -152,23 +476,22 @@ impl AutoTrader {
 
                 debug!("AutoTrader tick: Performing scan and manage cycle.");
 
-                // Scan for opportunities - Requires refactoring scan_for_opportunities
-                // to accept cloned Arcs instead of &self.
-                // For now, log the need for refactoring.
-                error!("Refactoring needed: scan_for_opportunities needs adjustment to work in spawned task without full Self access.");
-                // Example call after refactoring:
-                // if let Err(e) = scan_for_opportunities_task(
-                //     strategies.clone(), helius_client.clone(), risk_analyzer.clone(),
-                //     position_manager.clone(), config.clone(), wallet_manager.clone(),
-                //     jupiter_client.clone(), solana_client.clone()
-                // ).await {
-                //     error!("Error scanning for opportunities: {}", e);
-                // }
+                // Call the standalone scan cycle function
+                if let Err(e) = run_scan_cycle(
+                    strategies.clone(),
+                    helius_client.clone(),
+                    risk_analyzer.clone(),
+                    position_manager.clone(),
+                    config.clone(),
+                    wallet_manager.clone(),
+                    jupiter_client.clone(),
+                    // solana_client is implicitly used by others
+                ).await {
+                    error!("Error during scan cycle: {}", e);
+                }
 
-
-                // Manage existing positions (handled by PositionManager's task now?)
-                // If PositionManager runs its own loop, this might not be needed here.
-                // If not, uncomment:
+                // Position management is handled by PositionManager's own task,
+                // so no need to call manage_positions here.
                 // if let Err(e) = self_clone.position_manager.manage_positions().await {
                 //     error!("Error managing positions: {:?}", e);
                 // }
@@ -224,285 +547,6 @@ impl AutoTrader {
 
     pub async fn get_status(&self) -> bool {
         *self.running.read().await
-    }
-
-    // --- Core Logic ---
-
-    async fn scan_for_opportunities(&self) -> Result<()> {
-        debug!("Scanning for trading opportunities...");
-
-        let strategies_guard = self.strategies.read().await;
-        let enabled_strategies: Vec<_> = strategies_guard
-            .values()
-            .filter(|s| s.enabled)
-            .cloned()
-            .collect();
-        drop(strategies_guard); // Release read lock
-
-        if enabled_strategies.is_empty() {
-            debug!("No enabled strategies found. Skipping scan.");
-            return Ok(());
-        }
-
-        if self.config.demo_mode {
-            self.simulate_scan(&enabled_strategies).await?;
-            return Ok(());
-        }
-
-        // --- Real Mode Scan ---
-        info!("Scanning for new tokens using Helius...");
-        match self.helius_client.get_recent_tokens(60).await { // TODO: Make age configurable
-            Ok(tokens) => {
-                if tokens.is_empty() {
-                    debug!("No new tokens found in this scan cycle.");
-                    return Ok(());
-                }
-                info!("Found {} potential new tokens via Helius.", tokens.len());
-
-                for token in tokens {
-                    debug!("Processing potential token: {} ({})", token.name, token.address);
-                    match self.risk_analyzer.analyze_token(&token.address).await {
-                        Ok(risk_analysis) => {
-                            info!(
-                                "Analyzed token {}: Risk Level {}, Liquidity {:.2} SOL, Holders {}",
-                                token.symbol, risk_analysis.risk_level, risk_analysis.liquidity_sol, risk_analysis.holder_count
-                            );
-
-                            for strategy in &enabled_strategies {
-                                if self.meets_strategy_criteria(&token, &risk_analysis, strategy) {
-                                    info!("Token {} meets criteria for strategy '{}'", token.symbol, strategy.name);
-                                    if self.should_execute_buy(&token, strategy).await? { // Added ? for error handling
-                                        match self.execute_buy(&token, strategy).await {
-                                            Ok(_) => info!("Successfully executed buy for {} via strategy '{}'", token.symbol, strategy.name),
-                                            Err(e) => error!("Failed to execute buy for {}: {:?}", token.symbol, e),
-                                        }
-                                    } else {
-                                         debug!("Buy condition not met for token {} and strategy '{}'", token.symbol, strategy.name);
-                                    }
-                                } else {
-                                     debug!("Token {} does not meet criteria for strategy '{}'", token.symbol, strategy.name);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to analyze token {}: {:?}", token.address, e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Error fetching recent tokens from Helius: {:?}", e);
-                // Don't return error, just log and continue scan next time
-            }
-        }
-        Ok(())
-    }
-
-    async fn simulate_scan(&self, enabled_strategies: &[Strategy]) -> Result<()> {
-        info!("[DEMO MODE] Simulating scan for opportunities...");
-        // Simulate finding a token occasionally
-        if rand::random::<f64>() < 0.1 { // 10% chance per scan cycle
-            let demo_token_addr = format!("DemoMint{}", rand::random::<u32>());
-            let demo_token = TokenMetadata {
-                address: demo_token_addr.clone(),
-                name: format!("Demo Token {}", rand::random::<u16>()),
-                symbol: format!("DEMO{}", rand::random::<u16>()),
-                decimals: 9,
-                supply: Some(1_000_000_000 * 10u64.pow(9)), // Example supply
-                logo_uri: None,
-                creation_time: Some(Utc::now()),
-            };
-            info!("[DEMO MODE] Simulated finding token: {} ({})", demo_token.name, demo_token.symbol);
-
-            // Simulate analysis
-            let risk_analysis = RiskAnalysis {
-                 token_address: demo_token_addr,
-                 risk_level: rand::random::<u32>() % 101, // 0-100
-                 liquidity_sol: (rand::random::<f64>() * 50.0) + 5.0, // 5-55 SOL
-                 holder_count: (rand::random::<u32>() % 500) + 10, // 10-509 holders
-                 has_mint_authority: rand::random::<bool>(),
-                 has_freeze_authority: rand::random::<bool>(),
-                 lp_tokens_burned: rand::random::<bool>(),
-                 transfer_tax_percent: if rand::random::<f64>() < 0.1 { rand::random::<f64>() * 10.0 } else { 0.0 },
-                 can_sell: rand::random::<f64>() > 0.1, // 90% chance can sell
-                 concentration_percent: rand::random::<f64>() * 50.0, // 0-50%
-                 details: vec!["Simulated analysis".to_string()],
-            };
-             info!("[DEMO MODE] Simulated analysis for {}: Risk {}, Liquidity {:.2}", demo_token.symbol, risk_analysis.risk_level, risk_analysis.liquidity_sol);
-
-
-            for strategy in enabled_strategies {
-                if self.meets_strategy_criteria(&demo_token, &risk_analysis, strategy) {
-                    info!("[DEMO MODE] Token {} meets criteria for strategy '{}'", demo_token.symbol, strategy.name);
-                     if self.should_execute_buy(&demo_token, strategy).await? {
-                         info!("[DEMO MODE] Executing simulated buy for {} via strategy '{}'", demo_token.symbol, strategy.name);
-                         // In demo, just log, maybe create a demo position entry
-                         if let Err(e) = self.position_manager.create_demo_position(
-                             &demo_token.address,
-                             &demo_token.name,
-                             &demo_token.symbol,
-                             &strategy.id,
-                             strategy.max_position_size_sol, // Use strategy defined size
-                         ).await {
-                             error!("[DEMO MODE] Error creating demo position: {}", e);
-                         }
-                     }
-                }
-            }
-        } else {
-             debug!("[DEMO MODE] No simulated token found this cycle.");
-        }
-        Ok(())
-    }
-
-
-    fn meets_strategy_criteria(
-        &self,
-        token: &TokenMetadata,
-        risk_analysis: &RiskAnalysis,
-        strategy: &Strategy,
-    ) -> bool {
-        if risk_analysis.risk_level > strategy.max_risk_level {
-            debug!("Token {} rejected by strategy '{}': Risk level {} > {}", token.symbol, strategy.name, risk_analysis.risk_level, strategy.max_risk_level);
-            return false;
-        }
-        if risk_analysis.liquidity_sol < strategy.min_liquidity_sol as f64 {
-             debug!("Token {} rejected by strategy '{}': Liquidity {:.2} < {}", token.symbol, strategy.name, risk_analysis.liquidity_sol, strategy.min_liquidity_sol);
-            return false;
-        }
-        if let Some(creation_time) = token.creation_time {
-            let age_minutes = Utc::now().signed_duration_since(creation_time).num_minutes();
-            if age_minutes > 0 && age_minutes as u32 > strategy.max_token_age_minutes { // Check age > 0 to avoid issues with clock sync
-                 debug!("Token {} rejected by strategy '{}': Age {} mins > {}", token.symbol, strategy.name, age_minutes, strategy.max_token_age_minutes);
-                return false;
-            }
-        } else {
-             // If creation time is unknown, maybe reject or allow based on strategy config?
-             // For now, allow if creation time is None.
-             debug!("Token {} accepted by strategy '{}': Creation time unknown.", token.symbol, strategy.name);
-        }
-        if risk_analysis.holder_count < strategy.min_holders {
-             debug!("Token {} rejected by strategy '{}': Holders {} < {}", token.symbol, strategy.name, risk_analysis.holder_count, strategy.min_holders);
-            return false;
-        }
-        // Add more checks based on RiskAnalysis fields (mint/freeze authority, tax, etc.) if needed
-        if !risk_analysis.can_sell && strategy.require_can_sell {
-             debug!("Token {} rejected by strategy '{}': Cannot sell and strategy requires it", token.symbol, strategy.name);
-            return false;
-        }
-        if risk_analysis.has_freeze_authority && strategy.reject_if_freeze_authority {
-             debug!("Token {} rejected by strategy '{}': Has freeze authority and strategy rejects it", token.symbol, strategy.name);
-            return false;
-        }
-        // ... other checks
-
-        true
-    }
-
-    async fn should_execute_buy(
-        &self,
-        token: &TokenMetadata,
-        strategy: &Strategy,
-    ) -> Result<bool> { // Return Result
-        // Check if already holding this token (across all strategies or just this one?)
-        // Let's check across all active positions for simplicity first.
-        if self.position_manager.has_active_position(&token.address).await {
-            debug!("Skipping buy for {}: Already have an active position.", token.symbol);
-            return Ok(false);
-        }
-
-        // Check strategy-specific limits (concurrent positions, budget)
-        let strategy_positions = self.position_manager.get_active_positions_by_strategy(&strategy.id).await;
-
-        if strategy_positions.len() >= strategy.max_concurrent_positions as usize {
-            info!("Skipping buy for {}: Max concurrent positions ({}) reached for strategy '{}'.",
-                 token.symbol, strategy.max_concurrent_positions, strategy.name);
-            return Ok(false);
-        }
-
-        let used_budget: f64 = strategy_positions.iter().map(|p| p.entry_value_sol).sum(); // Use entry value
-        let position_size = strategy.max_position_size_sol; // Determine intended size first
-        let remaining_budget = strategy.total_budget_sol - used_budget;
-
-        if position_size > remaining_budget {
-            warn!("Skipping buy for {}: Required size {:.4} SOL exceeds remaining budget {:.4} SOL for strategy '{}'.",
-                 token.symbol, position_size, remaining_budget, strategy.name);
-            return Ok(false);
-        }
-
-        // Check overall wallet balance? Maybe not here, rely on swap failing if insufficient.
-
-        Ok(true)
-    }
-
-    async fn execute_buy(
-        &self,
-        token: &TokenMetadata,
-        strategy: &Strategy,
-    ) -> Result<SwapResult> { // Return SwapResult
-        info!(
-            "Executing buy for token {} ({}) using strategy '{}'",
-            token.symbol, token.address, strategy.name
-        );
-
-        // Determine position size based on strategy (consider risk adjustment?)
-        let position_size_sol = strategy.max_position_size_sol; // Simple for now
-        // TODO: Add risk-adjusted position sizing?
-        // position_size_sol = position_size_sol * risk_adjustment_factor;
-
-        // Ensure position size is not zero or negative
-        if position_size_sol <= 0.0 {
-            return Err(anyhow!("Calculated position size is zero or negative for token {}", token.symbol));
-        }
-
-        // Fetch token decimals if not already known (needed for Jupiter swap)
-        // Assuming TokenMetadata now includes decimals correctly populated by Helius/RiskAnalyzer
-        let token_decimals = token.decimals;
-
-        // Execute the swap via JupiterClient through WalletManager
-        let swap_result = self.jupiter_client.swap_sol_to_token(
-            &token.address,
-            token_decimals,
-            position_size_sol,
-            strategy.slippage_bps.unwrap_or(self.config.default_slippage_bps), // Use strategy slippage or default
-            strategy.priority_fee_micro_lamports.or(Some(self.config.default_priority_fee_micro_lamports)), // Use strategy priority fee or default
-            self.wallet_manager.clone(),
-        ).await.context(format!("Failed to execute SOL to {} swap", token.symbol))?;
-
-        info!(
-            "Swap successful for {}. Signature: {}, Estimated Out: {:.6}",
-            token.symbol, swap_result.transaction_signature, swap_result.out_amount_ui
-        );
-
-        // Create a new position entry
-        // TODO: Get actual out amount after confirmation if possible
-        let actual_out_amount = swap_result.actual_out_amount_ui.unwrap_or(swap_result.out_amount_ui); // Use estimate if actual not available
-
-        self.position_manager.create_position(
-            &token.address,
-            &token.name,
-            &token.symbol,
-            token.decimals,
-            &strategy.id,
-            position_size_sol, // Entry value in SOL
-            actual_out_amount, // Amount of token received
-            swap_result.price_impact_pct,
-            &swap_result.transaction_signature,
-            // Pass SL/TP/Trailing settings from strategy
-            strategy.stop_loss_percent,
-            strategy.take_profit_percent,
-            strategy.trailing_stop_percent,
-            strategy.max_hold_time_minutes,
-        ).await.context("Failed to create position entry after successful swap")?;
-
-        info!(
-            "Position created for {} ({}) with {:.4} SOL entry value.",
-            token.name, token.symbol, position_size_sol
-        );
-
-        // TODO: Send notification (Telegram?)
-
-        Ok(swap_result)
     }
 
     // --- Performance Stats ---

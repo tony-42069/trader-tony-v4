@@ -314,7 +314,7 @@ impl RiskAnalyzer {
         // --- Simulate Sell ---
         // 4. Get Sell Quote (Selling the estimated amount received from buy)
         // Need token decimals for this quote
-        let token_decimals = match self.solana_client.get_mint_info(token_address).await {
+        let _token_decimals = match self.solana_client.get_mint_info(token_address).await { // Prefixed as unused
              Ok(info) => info.decimals,
              Err(e) => {
                  warn!("Sellability Check: Failed to get decimals for {}: {:?}. Cannot simulate sell.", token_address_str, e);

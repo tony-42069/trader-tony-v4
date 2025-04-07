@@ -7,7 +7,7 @@ use tracing::{error, info, warn}; // Added warn
 
 use crate::bot::keyboards; // Assuming keyboards module exists for callbacks
 use crate::bot::BotState;
-use crate::trading::strategy::Strategy; // Assuming Strategy struct exists
+// Removed: use crate::trading::strategy::Strategy;
 use teloxide::utils::markdown::escape; // Use teloxide's built-in escape function
 
 #[derive(BotCommands, Clone, Debug)] // Added Debug
@@ -378,7 +378,8 @@ pub async fn callback_handler(
         }
 
         // --- Handle different callback data ---
-        let mut response_text = None;
+        // This variable will store the text for the answer_callback_query notification
+        let mut notification_text: Option<String> = None;
 
         match data.as_str() {
             "start_autotrader" => {
@@ -387,7 +388,7 @@ pub async fn callback_handler(
                 let auto_trader_guard = locked_state.auto_trader.lock().await;
                 match auto_trader_guard.start().await {
                     Ok(_) => {
-                        response_text = Some("✅ AutoTrader started successfully.".to_string());
+                        notification_text = Some("✅ AutoTrader started successfully.".to_string());
                         // Edit the original message to update keyboard
                         if let Some(msg) = q.message {
                              bot.edit_message_reply_markup(msg.chat.id, msg.id)
@@ -397,7 +398,7 @@ pub async fn callback_handler(
                     }
                     Err(e) => {
                          error!("Failed to start AutoTrader: {}", e);
-                         response_text = Some(format!("❌ Failed to start AutoTrader: {}", e));
+                         notification_text = Some(format!("❌ Failed to start AutoTrader: {}", e));
                     }
                 }
             }
@@ -406,7 +407,7 @@ pub async fn callback_handler(
                  let auto_trader_guard = locked_state.auto_trader.lock().await;
                  match auto_trader_guard.stop().await { // Call stop (which takes &self)
                      Ok(_) => {
-                         response_text = Some("⏹️ AutoTrader stopped successfully.".to_string());
+                         notification_text = Some("⏹️ AutoTrader stopped successfully.".to_string());
                          // Edit the original message to update keyboard
                          if let Some(msg) = q.message {
                               bot.edit_message_reply_markup(msg.chat.id, msg.id)
@@ -416,7 +417,7 @@ pub async fn callback_handler(
                      }
                      Err(e) => {
                           error!("Failed to stop AutoTrader: {}", e);
-                          response_text = Some(format!("❌ Failed to stop AutoTrader: {}", e));
+                          notification_text = Some(format!("❌ Failed to stop AutoTrader: {}", e));
                      }
                  }
             }
@@ -433,9 +434,9 @@ pub async fn callback_handler(
                      bot.edit_message_text(msg.chat.id, msg.id, escape(&status_message))
                         .parse_mode(ParseMode::MarkdownV2)
                         .reply_markup(keyboards::autotrader_menu(running))
-                        .await?;
+                         .await?;
                  }
-                 response_text = None; // Message already edited
+                 notification_text = None; // Message already edited
             }
              "main_menu" => {
                  // Re-send the main menu message
@@ -450,7 +451,7 @@ pub async fn callback_handler(
                         .reply_markup(keyboards::main_menu())
                         .await?;
                   }
-                 response_text = None;
+                 notification_text = None;
              }
              "positions_menu" => {
                  // Call the logic similar to /positions command
@@ -462,7 +463,7 @@ pub async fn callback_handler(
                         .reply_markup(keyboards::positions_menu())
                         .await?;
                  }
-                 response_text = None;
+                 notification_text = None;
              }
              "strategy_menu" => {
                  // Call the logic similar to /strategy command
@@ -474,7 +475,7 @@ pub async fn callback_handler(
                         .reply_markup(keyboards::strategy_menu())
                         .await?;
                  }
-                 response_text = None;
+                 notification_text = None;
              }
              "show_balance" => {
                  // Call the logic similar to /balance command
@@ -484,21 +485,21 @@ pub async fn callback_handler(
                      Err(_) => "❌ Failed to retrieve balance.".to_string(),
                  };
                  // Send as a new message or edit? Alert might be better.
-                 response_text = Some(balance_message);
+                 notification_text = Some(balance_message);
              }
              "show_help" => {
-                 response_text = Some(Command::descriptions().to_string());
+                 notification_text = Some(Command::descriptions().to_string());
              }
 
 
             _ => {
                 warn!("Unhandled callback data: {}", data);
-                response_text = Some("⚠️ Action not implemented yet.".to_string());
+                notification_text = Some("⚠️ Action not implemented yet.".to_string());
             }
         }
 
         // Answer the callback query to remove the "loading" state
-        if let Some(text) = response_text {
+        if let Some(text) = notification_text {
              bot.answer_callback_query(q.id).text(text).show_alert(false).await?; // Show simple notification
         } else {
              bot.answer_callback_query(q.id).await?; // Just acknowledge if message was edited

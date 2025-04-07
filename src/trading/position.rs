@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc}; // Added ChronoDuration
 use rand::Rng; // For demo mode price updates
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf, sync::Arc}; // Added PathBuf
+use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc}; // Added PathBuf, FromStr
 use tokio::{
     fs, // Added tokio::fs for async file operations
     sync::{Mutex, RwLock},
@@ -761,28 +761,49 @@ impl PositionManager {
         };
 
         info!(
-            "Exit swap successful for {}. Signature: {}, Estimated SOL Out: {:.6}",
+            "Exit swap sent for {}. Signature: {}, Estimated SOL Out: {:.6}",
             position.token_symbol, swap_result.transaction_signature, swap_result.out_amount_ui
         );
 
-        // TODO: Confirm transaction and get actual SOL received if possible.
-        // This might involve waiting and parsing the transaction details.
-        // For now, use the estimated amount from Jupiter.
-        let actual_exit_value_sol = swap_result.actual_out_amount_ui.unwrap_or(swap_result.out_amount_ui);
-        let actual_exit_price_sol = actual_exit_value_sol / position.entry_token_amount; // Calculate effective exit price
+        // --- Confirm Transaction ---
+        info!("Confirming exit transaction: {}", swap_result.transaction_signature);
+        let signature = solana_sdk::signature::Signature::from_str(&swap_result.transaction_signature)
+            .context("Failed to parse exit transaction signature")?;
 
-        // Close the position with final details
-        self.close_position(
-            &position.id,
-            PositionStatus::Closed, // Mark as successfully closed
-            actual_exit_price_sol,
-            actual_exit_value_sol,
-            &swap_result.transaction_signature,
-        ).await?;
+        // TODO: Make confirmation timeout configurable
+        match self.solana_client.confirm_transaction(&signature, solana_sdk::commitment_config::CommitmentLevel::Confirmed, 60).await {
+            Ok(_) => {
+                info!("Exit transaction {} confirmed successfully.", signature);
 
-        info!("Successfully executed exit and closed position {}", position.id);
-        // TODO: Send notification
+                // --- Close Position (Only after confirmation) ---
+                // TODO: Get actual SOL received after confirmation if possible (requires parsing tx details)
+                let actual_exit_value_sol = swap_result.actual_out_amount_ui.unwrap_or(swap_result.out_amount_ui); // Use estimate for now
+                let actual_exit_price_sol = if position.entry_token_amount > 0.0 {
+                    actual_exit_value_sol / position.entry_token_amount // Calculate effective exit price
+                } else {
+                    0.0 // Avoid division by zero if entry amount was somehow zero
+                };
 
-        Ok(())
+                self.close_position(
+                    &position.id,
+                    PositionStatus::Closed, // Mark as successfully closed
+                    actual_exit_price_sol,
+                    actual_exit_value_sol,
+                    &swap_result.transaction_signature,
+                ).await?;
+
+                info!("Successfully executed exit and closed position {}", position.id);
+                // TODO: Send notification
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to confirm exit transaction {}: {:?}", signature, e);
+                // Don't close the position as Closed if confirmation fails.
+                // Mark as Failed instead? Or leave as Closing for retry?
+                // For now, return error to indicate confirmation failure.
+                // The caller (manage_positions_cycle) will mark as Failed.
+                Err(e).context(format!("Exit transaction {} failed confirmation", signature))
+            }
+        }
     }
 }

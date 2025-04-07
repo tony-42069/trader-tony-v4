@@ -107,16 +107,11 @@ impl WalletManager {
         let recent_blockhash = self.solana_client.get_rpc().get_latest_blockhash()?; // Use Arc<RpcClient> directly
         transaction.message.set_recent_blockhash(recent_blockhash);
 
-        // Sign the VersionedTransaction using sign (takes slice of signers)
-        // Need to check if sign can fail and handle error appropriately if it can.
-        // The `sign` method itself doesn't return a Result, so we assume it succeeds if no panic.
-        // TODO: Implement proper signing for VersionedTransaction V0 messages.
-        // transaction.sign(&[&*self.keypair], recent_blockhash); // This is incorrect for VersionedTransaction
-
-        // Error handling for signing might need more investigation if sign can fail silently.
-        // For now, assume success if no panic. (Transaction will likely fail on-chain without signature)
-        warn!("VersionedTransaction signing is not fully implemented. Transaction will likely fail.");
-        // Removed dangling characters from previous map_err
+        // Sign the VersionedTransaction using the keypair
+        // The `sign` method takes a slice of signers and the blockhash.
+        // It modifies the transaction in place and panics on error (e.g., wrong key).
+        // We assume the keypair is correct, so we don't expect a panic here.
+        transaction.sign(&[self.keypair.as_ref()], recent_blockhash);
 
         debug!("Signed versioned transaction with blockhash: {}", recent_blockhash);
 
