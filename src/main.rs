@@ -14,7 +14,8 @@ mod models;
 mod solana;
 mod trading;
 
-use crate::bot::commands::{command_handler, Command};
+// Import command and callback handlers
+use crate::bot::commands::{callback_handler, command_handler, Command}; // Added callback_handler
 use crate::config::Config;
 use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
@@ -69,11 +70,11 @@ async fn main() -> Result<()> {
 
     // Start the bot
     info!("Starting TraderTony V4 bot...");
-    let handler = Update::filter_message().branch(
-        dptree::entry()
-            .filter_command::<Command>()
-            .endpoint(command_handler),
-    );
+
+    // Combine command and callback handlers
+    let handler = dptree::entry()
+        .branch(Update::filter_message().filter_command::<Command>().endpoint(command_handler))
+        .branch(Update::filter_callback_query().endpoint(callback_handler));
 
     Dispatcher::builder(bot, handler)
         // Provide the correctly wrapped state to the dispatcher

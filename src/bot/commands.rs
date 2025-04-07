@@ -51,7 +51,7 @@ pub async fn command_handler(
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
     let user_id = msg.from().map(|user| user.id);
-    
+
     let locked_state = state.lock().await; // Lock state once
 
     // Check authorization
@@ -63,13 +63,13 @@ pub async fn command_handler(
         ).await?;
         return Ok(());
     }
-    
+
     info!("Received command: {:?} from user: {:?}", cmd, user_id);
 
     // Drop the lock before potentially long-running async operations inside match arms
     // Clone necessary parts of the state if needed within the arms, or re-lock briefly.
     // For simplicity here, we keep the lock, but be mindful of this in complex handlers.
-    
+
     match cmd {
         Command::Start => {
             let welcome_message = format!(
@@ -93,7 +93,7 @@ pub async fn command_handler(
         Command::Balance => {
              // Re-lock state briefly if needed, or pass cloned client/wallet
             let balance_result = locked_state.wallet_manager.get_sol_balance().await;
-            
+
             match balance_result {
                 Ok(balance) => {
                     let balance_message = format!(
@@ -115,10 +115,9 @@ pub async fn command_handler(
             }
         },
         Command::Autotrader => {
-            // Need to implement get_status on AutoTrader
-            // let running = locked_state.auto_trader.lock().await.get_status().await; // Example lock if AutoTrader is Mutex guarded
-            let running = false; // Placeholder
-            
+            // Fetch the actual status from the AutoTrader instance
+            let running = locked_state.auto_trader.lock().await.get_status().await;
+
             let status_message = format!(
                 "🤖 *AutoTrader Status*\n\n\
                 *Status:* {}\n\
@@ -134,15 +133,34 @@ pub async fn command_handler(
                 .await?;
         },
         Command::Strategy => {
-             // Need to implement list_strategies on AutoTrader
-             // let strategies = locked_state.auto_trader.lock().await.list_strategies().await; // Example lock
-             let strategies: Vec<Strategy> = vec![]; // Placeholder
+             // Fetch strategies from AutoTrader
+             let strategies = locked_state.auto_trader.lock().await.list_strategies().await;
 
             let strategies_message = if strategies.is_empty() {
-                "No strategies configured yet.".to_string()
+                "✅ No strategies configured yet.".to_string()
             } else {
-                 // Format strategies... (implementation omitted for brevity)
-                 "Existing strategies:\n- Strategy 1\n- Strategy 2".to_string() // Placeholder
+                 let strategies_list = strategies
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "*{}* (`{}`): {}\n\
+                            Budget: {:.2} SOL | Max Pos: {:.2} SOL | Concurrent: {}\n\
+                            Risk Lvl: {} | Min Liq: {} SOL | Min Holders: {}",
+                            s.name,
+                            s.id, // Maybe show only part of the ID?
+                            if s.enabled { "✅ Enabled" } else { "❌ Disabled" },
+                            s.total_budget_sol,
+                            s.max_position_size_sol,
+                            s.max_concurrent_positions,
+                            s.max_risk_level,
+                            s.min_liquidity_sol,
+                            s.min_holders
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n---\n\n"); // Separator
+
+                 format!("📊 *Configured Strategies*\n\n{}", strategies_list)
             };
 
              // Use MarkdownV2 and escape the message
@@ -152,15 +170,44 @@ pub async fn command_handler(
                 .await?;
         },
         Command::Positions => {
-            // Need PositionManager and get_active_positions implementation
-            // let positions = locked_state.auto_trader.lock().await.position_manager.get_active_positions().await; // Example lock
-            let positions: Vec<()> = vec![]; // Placeholder
+            // Fetch active positions from the PositionManager
+            // Need to lock the AutoTrader Mutex first to access PositionManager
+            // Ensure position_manager is public in AutoTrader struct or add a getter method.
+            let positions = locked_state.auto_trader.lock().await
+                .position_manager // Access PositionManager
+                .get_active_positions().await; // Call its method
 
             let positions_message = if positions.is_empty() {
-                "No active positions.".to_string()
+                "✅ No active positions.".to_string()
             } else {
-                // Format positions... (implementation omitted)
-                "Active positions:\n- Position A\n- Position B".to_string() // Placeholder
+                let positions_list = positions
+                    .iter()
+                    .map(|p| {
+                        // Calculate current PnL based on latest price if available
+                        let current_value = p.entry_token_amount * p.current_price_sol;
+                        let pnl = current_value - p.entry_value_sol;
+                        let pnl_percent = if p.entry_value_sol > 0.0 { (pnl / p.entry_value_sol) * 100.0 } else { 0.0 };
+                        format!(
+                            "*{}* (`{}`)\n\
+                            Status: {}\n\
+                            Entry SOL: {:.4}\n\
+                            Current SOL: {:.4}\n\
+                            PnL: {:.4} SOL ({:.2}%)\n\
+                            Entry Time: {}",
+                            p.token_symbol,
+                            p.token_address, // Consider shortening address display
+                            p.status,
+                            p.entry_value_sol,
+                            current_value,
+                            pnl,
+                            pnl_percent,
+                            p.entry_time.format("%Y-%m-%d %H:%M") // Shorter time format
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n---\n\n"); // Separator
+
+                format!("📈 *Active Positions*\n\n{}", positions_list)
             };
 
              // Use MarkdownV2 and escape the message
@@ -176,15 +223,54 @@ pub async fn command_handler(
                 escape(&format!("🔍 Analyzing token: `{}`\nPlease wait...", token_address))
             ).parse_mode(ParseMode::MarkdownV2).await?; // Use MarkdownV2
 
-            // Need RiskAnalyzer and analyze_token implementation
-            // let analysis_result = locked_state.auto_trader.lock().await.risk_analyzer.analyze_token(&token_address).await; // Example lock
-            let analysis_result: Result<(), _> = Err(()); // Placeholder
+            // Call RiskAnalyzer::analyze_token
+            // Ensure risk_analyzer is public or add a getter in AutoTrader
+            let analysis_result = locked_state.auto_trader.lock().await
+                .risk_analyzer // Access RiskAnalyzer
+                .analyze_token(&token_address).await; // Call analyze_token
 
             match analysis_result {
-                Ok(_analysis) => {
-                    // Format analysis... (implementation omitted)
-                    // Placeholder - format properly with MarkdownV2 escaping if needed
-                    let analysis_message = format!("Analysis results for `{}`:\nRisk: Medium\nLiquidity: Good", token_address);
+                Ok(analysis) => { // Use the actual analysis result
+                    // Format the analysis result
+                    let risk_level_emoji = match analysis.risk_level {
+                        0..=30 => "🟢", // Low risk
+                        31..=70 => "🟠", // Medium risk
+                        _ => "🔴", // High risk
+                    };
+
+                    let risk_factors = if analysis.details.is_empty() {
+                        "None detected".to_string()
+                    } else {
+                        analysis.details.iter().map(|d| format!("- {}", d)).collect::<Vec<_>>().join("\n")
+                    };
+
+                    let analysis_message = format!(
+                        "🔍 *Token Analysis: {}*\n\n\
+                        *Address:* `{}`\n\
+                        *Risk Score:* {} {} \\({}/100\\)\n\n\
+                        *Checks:*\n\
+                        - Liquidity: {:.2} SOL\n\
+                        - Holders: {}\n\
+                        - Mint Authority: {}\n\
+                        - Freeze Authority: {}\n\
+                        - LP Burned/Locked: {}\n\
+                        - Transfer Tax: {:.1}%\n\
+                        - Sellable (Honeypot Check): {}\n\
+                        - Top Holder Concentration: {:.1}%\n\n\
+                        *Risk Factors Found:*\n{}",
+                        analysis.token_address, // Use address from analysis
+                        analysis.token_address,
+                        risk_level_emoji, analysis.risk_level, analysis.risk_level, // Show score twice for clarity
+                        analysis.liquidity_sol,
+                        analysis.holder_count,
+                        if analysis.has_mint_authority { "⚠️ Yes" } else { "✅ No" },
+                        if analysis.has_freeze_authority { "⚠️ Yes" } else { "✅ No" },
+                        if analysis.lp_tokens_burned { "✅ Yes" } else { "🟠 No/Unknown" },
+                        analysis.transfer_tax_percent,
+                        if analysis.can_sell { "✅ Yes" } else { "🔴 No" },
+                        analysis.concentration_percent,
+                        risk_factors
+                    );
 
                     // Use MarkdownV2 and escape the message
                     bot.send_message(chat_id, escape(&analysis_message))
@@ -225,7 +311,7 @@ pub async fn command_handler(
                 ).await?;
                 return Ok(());
             }
-            
+
             bot.send_message(
                 chat_id,
                  // Use MarkdownV2 and escape the message
@@ -260,6 +346,168 @@ pub async fn command_handler(
             }
         },
     }
-    
+
+    Ok(())
+}
+
+
+// --- Callback Query Handler ---
+
+pub async fn callback_handler(
+    bot: Bot,
+    q: CallbackQuery,
+    state: Arc<Mutex<BotState>>,
+) -> ResponseResult<()> {
+    let chat_id = q.message.as_ref().map(|msg| msg.chat.id);
+    let user_id = q.from.id;
+
+    if let Some(data) = q.data {
+        info!("Received callback query with data: {} from user: {}", data, user_id);
+
+        let locked_state = state.lock().await; // Lock state
+
+        // Check authorization again for callbacks
+        if !is_authorized(&locked_state, Some(user_id)).await {
+            warn!("Unauthorized callback query attempt by user: {}", user_id);
+            if let Some(id) = chat_id {
+                 bot.send_message(id, "⚠️ You are not authorized for this action.").await?;
+            }
+             // Answer callback query to remove the "loading" state on the button
+             bot.answer_callback_query(q.id).text("Unauthorized").await?;
+            return Ok(());
+        }
+
+        // --- Handle different callback data ---
+        let mut response_text = None;
+
+        match data.as_str() {
+            "start_autotrader" => {
+                info!("Callback: Start AutoTrader requested.");
+                // Lock the mutex and call start (which now takes &self)
+                let auto_trader_guard = locked_state.auto_trader.lock().await;
+                match auto_trader_guard.start().await {
+                    Ok(_) => {
+                        response_text = Some("✅ AutoTrader started successfully.".to_string());
+                        // Edit the original message to update keyboard
+                        if let Some(msg) = q.message {
+                             bot.edit_message_reply_markup(msg.chat.id, msg.id)
+                                .reply_markup(keyboards::autotrader_menu(true)) // Show stop button
+                                .await?;
+                        }
+                    }
+                    Err(e) => {
+                         error!("Failed to start AutoTrader: {}", e);
+                         response_text = Some(format!("❌ Failed to start AutoTrader: {}", e));
+                    }
+                }
+            }
+            "stop_autotrader" => {
+                 info!("Callback: Stop AutoTrader requested.");
+                 let auto_trader_guard = locked_state.auto_trader.lock().await;
+                 match auto_trader_guard.stop().await { // Call stop (which takes &self)
+                     Ok(_) => {
+                         response_text = Some("⏹️ AutoTrader stopped successfully.".to_string());
+                         // Edit the original message to update keyboard
+                         if let Some(msg) = q.message {
+                              bot.edit_message_reply_markup(msg.chat.id, msg.id)
+                                 .reply_markup(keyboards::autotrader_menu(false)) // Show start button
+                                 .await?;
+                         }
+                     }
+                     Err(e) => {
+                          error!("Failed to stop AutoTrader: {}", e);
+                          response_text = Some(format!("❌ Failed to stop AutoTrader: {}", e));
+                     }
+                 }
+            }
+            // --- Add other callback handlers here ---
+            "autotrader_menu" => {
+                 // Re-send the autotrader status message and keyboard
+                 let running = locked_state.auto_trader.lock().await.get_status().await;
+                 let status_message = format!(
+                    "🤖 *AutoTrader Status*\n\n*Status:* {}\n*Mode:* {}",
+                    if running { "✅ Running" } else { "⏹️ Stopped" },
+                    if locked_state.config.demo_mode { "🧪 DEMO" } else { "🔴 REAL" }
+                 );
+                 if let Some(msg) = q.message { // Edit the original message
+                     bot.edit_message_text(msg.chat.id, msg.id, escape(&status_message))
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .reply_markup(keyboards::autotrader_menu(running))
+                        .await?;
+                 }
+                 response_text = None; // Message already edited
+            }
+             "main_menu" => {
+                 // Re-send the main menu message
+                 let welcome_message = format!(
+                    "🤖 *Welcome back!*\n\n*Mode:* {}\n*Wallet:* `{}`",
+                    if locked_state.config.demo_mode { "🧪 DEMO" } else { "🔴 REAL" },
+                    locked_state.wallet_manager.get_public_key(),
+                 );
+                  if let Some(msg) = q.message {
+                     bot.edit_message_text(msg.chat.id, msg.id, escape(&welcome_message))
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .reply_markup(keyboards::main_menu())
+                        .await?;
+                  }
+                 response_text = None;
+             }
+             "positions_menu" => {
+                 // Call the logic similar to /positions command
+                 let positions = locked_state.auto_trader.lock().await.position_manager.get_active_positions().await;
+                 let positions_message = if positions.is_empty() { "✅ No active positions.".to_string() } else { /* ... formatting ... */ "Formatted positions".to_string() }; // Simplified formatting
+                 if let Some(msg) = q.message {
+                     bot.edit_message_text(msg.chat.id, msg.id, escape(&positions_message))
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .reply_markup(keyboards::positions_menu())
+                        .await?;
+                 }
+                 response_text = None;
+             }
+             "strategy_menu" => {
+                 // Call the logic similar to /strategy command
+                 let strategies = locked_state.auto_trader.lock().await.list_strategies().await;
+                 let strategies_message = if strategies.is_empty() { "✅ No strategies configured yet.".to_string() } else { /* ... formatting ... */ "Formatted strategies".to_string() }; // Simplified formatting
+                 if let Some(msg) = q.message {
+                     bot.edit_message_text(msg.chat.id, msg.id, escape(&strategies_message))
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .reply_markup(keyboards::strategy_menu())
+                        .await?;
+                 }
+                 response_text = None;
+             }
+             "show_balance" => {
+                 // Call the logic similar to /balance command
+                 let balance_result = locked_state.wallet_manager.get_sol_balance().await;
+                 let balance_message = match balance_result {
+                     Ok(bal) => format!("💰 *Balance:* {:.6} SOL", bal),
+                     Err(_) => "❌ Failed to retrieve balance.".to_string(),
+                 };
+                 // Send as a new message or edit? Alert might be better.
+                 response_text = Some(balance_message);
+             }
+             "show_help" => {
+                 response_text = Some(Command::descriptions().to_string());
+             }
+
+
+            _ => {
+                warn!("Unhandled callback data: {}", data);
+                response_text = Some("⚠️ Action not implemented yet.".to_string());
+            }
+        }
+
+        // Answer the callback query to remove the "loading" state
+        if let Some(text) = response_text {
+             bot.answer_callback_query(q.id).text(text).show_alert(false).await?; // Show simple notification
+        } else {
+             bot.answer_callback_query(q.id).await?; // Just acknowledge if message was edited
+        }
+
+    } else {
+        warn!("Received callback query with no data.");
+         bot.answer_callback_query(q.id).await?; // Acknowledge
+    }
+
     Ok(())
 }
