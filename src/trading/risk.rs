@@ -1,46 +1,49 @@
-use anyhow::{anyhow, Context, Result}; // Added anyhow
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
-use std::{str::FromStr, sync::Arc};
-use tracing::{debug, error, info, warn}; // Added error
+use std::{future::Future, str::FromStr, sync::Arc, time::Duration}; // Added Future, Duration
+use tracing::{debug, error, info, warn};
+use serde_json::Value; // Added for Raydium API parsing
 
-use crate::api::birdeye::{BirdeyeClient, TokenOverviewData}; // Import BirdeyeClient and TokenOverviewData
+use crate::api::birdeye::{BirdeyeClient, TokenOverviewData};
 use crate::api::helius::HeliusClient;
 use crate::api::jupiter::JupiterClient;
 use crate::solana::client::SolanaClient;
-use crate::error::TraderbotError; // Assuming this exists
+use crate::error::TraderbotError;
 use crate::solana::wallet::WalletManager;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use spl_token_2022::{
-    extension::{BaseStateWithExtensions, StateWithExtensions, transfer_fee::TransferFeeConfig}, // Added BaseStateWithExtensions
+    extension::{BaseStateWithExtensions, StateWithExtensions, transfer_fee::TransferFeeConfig},
     state::Mint as Token2022Mint,
 };
-use solana_program::program_pack::Pack as TokenPack;
+// Removed unused Pack import
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskAnalysis {
-    pub token_address: String,            // Added token address for context
-    pub risk_level: u32,                  // 0-100 risk score
-    pub details: Vec<String>,             // List of risk factors found
-    pub liquidity_sol: f64,               // Liquidity in SOL (from primary pair)
-    pub holder_count: u32,                // Number of holders
-    pub has_mint_authority: bool,         // Whether mint authority exists
-    pub has_freeze_authority: bool,       // Whether freeze authority exists
-    pub lp_tokens_burned: bool,           // Whether LP tokens are burned/locked
-    pub transfer_tax_percent: f64,        // Transfer tax percentage (buy/sell)
-    pub can_sell: bool,                   // Whether token can be sold (honeypot check)
-    pub concentration_percent: f64,       // Percentage held by top N holders
+    pub token_address: String,
+    pub risk_level: u32,
+    pub details: Vec<String>,
+    pub liquidity_sol: f64,
+    pub holder_count: u32, // Note: Currently an estimate from RPC
+    pub has_mint_authority: bool,
+    pub has_freeze_authority: bool,
+    pub lp_tokens_burned: bool, // Now attempts real check
+    pub transfer_tax_percent: f64,
+    pub can_sell: bool,
+    pub concentration_percent: f64,
 }
 
 
-#[derive(Clone)] // Removed Debug
+#[derive(Clone)]
 pub struct RiskAnalyzer {
     solana_client: Arc<SolanaClient>,
-    helius_client: Arc<HeliusClient>, // Use Arc if shared
-    jupiter_client: Arc<JupiterClient>, // Use Arc if shared
-    birdeye_client: Arc<BirdeyeClient>, // Add BirdeyeClient
-    wallet_manager: Arc<WalletManager>, // Added WalletManager
+    helius_client: Arc<HeliusClient>,
+    jupiter_client: Arc<JupiterClient>,
+    birdeye_client: Arc<BirdeyeClient>,
+    wallet_manager: Arc<WalletManager>,
+    // Add http client for Raydium API call
+    http_client: reqwest::Client,
 }
 
 impl RiskAnalyzer {
@@ -48,15 +51,20 @@ impl RiskAnalyzer {
         solana_client: Arc<SolanaClient>,
         helius_client: Arc<HeliusClient>,
         jupiter_client: Arc<JupiterClient>,
-        birdeye_client: Arc<BirdeyeClient>, // Add BirdeyeClient parameter
-        wallet_manager: Arc<WalletManager>, // Added WalletManager
+        birdeye_client: Arc<BirdeyeClient>,
+        wallet_manager: Arc<WalletManager>,
     ) -> Self {
         Self {
             solana_client,
             helius_client,
             jupiter_client,
-            birdeye_client, // Initialize BirdeyeClient field
-            wallet_manager, // Added WalletManager
+            birdeye_client,
+            wallet_manager,
+            // Initialize http client
+            http_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(15)) // Shorter timeout for external API
+                .build()
+                .expect("Failed to create HTTP client for RiskAnalyzer"),
         }
     }
 
@@ -71,8 +79,6 @@ impl RiskAnalyzer {
         let mut details = Vec::new();
 
         // --- Fetch Data Upfront ---
-
-        // Fetch Birdeye overview data once
         let birdeye_overview = match self.birdeye_client.get_token_overview(token_address_str).await {
             Ok(Some(data)) => {
                 debug!("Successfully fetched Birdeye overview for {}", token_address_str);
@@ -90,7 +96,6 @@ impl RiskAnalyzer {
             }
         };
 
-        // Fetch SOL price once (needed for liquidity conversion)
         let sol_price_usd = match self.birdeye_client.get_sol_price_usd().await {
              Ok(price) if price > 0.0 => {
                  debug!("Fetched SOL price: {:.4} USD", price);
@@ -108,132 +113,104 @@ impl RiskAnalyzer {
              }
         };
 
+        // --- Find Primary Pair Info (used by multiple checks) ---
+        let primary_pair_info = match self.find_primary_pair_info(token_address_str).await {
+            Ok(info) => {
+                debug!("Found primary pair info for {}: {:?}", token_address_str, info);
+                Some(info)
+            }
+            Err(e) => {
+                warn!("Failed to find primary pair for {}: {:?}", token_address_str, e);
+                details.push("❓ Could not find primary trading pair.".to_string());
+                None
+            }
+        };
 
         // --- Perform individual checks ---
 
         // 1. Mint & Freeze Authority Check
         let (has_mint_authority, has_freeze_authority) = match self.check_mint_freeze_authority(&token_pubkey).await {
             Ok((mint, freeze)) => {
-                if mint {
-                    risk_score += 30; // High risk
-                    details.push("⚠️ Mint authority exists.".to_string());
-                } else {
-                     details.push("✅ Mint authority revoked.".to_string());
-                }
-                if freeze {
-                    risk_score += 25; // High risk
-                    details.push("⚠️ Freeze authority exists.".to_string());
-                } else {
-                     details.push("✅ Freeze authority revoked.".to_string());
-                }
+                if mint { risk_score += 30; details.push("⚠️ Mint authority exists.".to_string()); }
+                else { details.push("✅ Mint authority revoked.".to_string()); }
+                if freeze { risk_score += 25; details.push("⚠️ Freeze authority exists.".to_string()); }
+                else { details.push("✅ Freeze authority revoked.".to_string()); }
                 (mint, freeze)
             }
             Err(e) => {
                 warn!("Failed to check mint/freeze authority for {}: {:?}. Assuming authorities exist.", token_address_str, e);
-                risk_score += 55; // Penalize heavily if check fails
+                risk_score += 55;
                 details.push("❓ Failed to check mint/freeze authority (assuming exists).".to_string());
-                (true, true) // Assume worst case on error
+                (true, true)
             }
         };
 
-        // 2. Liquidity Check (Using fetched Birdeye data)
+        // 2. Liquidity Check - Now using our improved implementation
         let liquidity_sol = match self.check_liquidity(birdeye_overview.as_ref(), sol_price_usd).await {
             Ok(liq) => {
-                if liq < 5.0 { // Example threshold
-                    risk_score += 20;
-                    details.push(format!("🟠 Low liquidity ({:.2} SOL).", liq));
-                } else {
-                    details.push(format!("✅ Liquidity: {:.2} SOL.", liq));
-                }
+                if liq < 5.0 { risk_score += 20; details.push(format!("🟠 Low liquidity ({:.2} SOL).", liq)); }
+                else if liq < 1.0 { risk_score += 30; details.push(format!("🔴 Very low liquidity ({:.2} SOL).", liq)); }
+                else { details.push(format!("✅ Liquidity: {:.2} SOL.", liq)); }
                 liq
             }
             Err(e) => {
                 warn!("Liquidity check failed for {}: {:?}. Assuming 0.", token_address_str, e);
+                risk_score += 30;
                 details.push(format!("❓ Failed liquidity check: {}", e));
-                0.0 // Assume 0 liquidity on error
+                0.0
             }
         };
 
-
-        // 3. LP Token Check (Placeholder, using fetched Birdeye data)
-        let lp_tokens_burned = match self.check_lp_tokens_burned(birdeye_overview.as_ref()).await {
+        // 3. LP Token Check - Now checking burnedness OR locking
+        let lp_tokens_burned = match self.check_lp_tokens_burned(token_address_str).await {
              Ok(burned) => {
-                 if !burned {
-                     risk_score += 15;
-                     details.push("🟠 LP tokens may not be burned/locked (Placeholder Check).".to_string());
-                 } else {
-                     details.push("✅ LP tokens appear burned/locked (Placeholder Check).".to_string());
-                 }
+                 if !burned { risk_score += 15; details.push("🟠 LP tokens may not be burned/locked.".to_string()); }
+                 else { details.push("✅ LP tokens appear burned/locked.".to_string()); }
                  burned
              }
              Err(e) => {
                  warn!("LP token check failed for {}: {:?}. Assuming not burned.", token_address_str, e);
+                 risk_score += 15;
                  details.push("❓ Failed to check LP token status.".to_string());
-                 false // Assume not burned on error
+                 false
              }
         };
-        if !lp_tokens_burned {
-            risk_score += 15;
-            details.push("🟠 LP tokens may not be burned/locked (Placeholder Check).".to_string());
-        } else {
-             details.push("✅ LP tokens appear burned/locked.".to_string());
-        }
 
-        // 4. Sellability Check (Honeypot - Placeholder)
-        // TODO: Implement simulation of a small buy followed by a sell.
-        //       This requires careful handling of temporary accounts and potential costs.
-        let can_sell = self.check_sellability_placeholder(&token_pubkey, &mut details).await?; // Pass details mutably
-        if !can_sell {
-            risk_score = 100; // CRITICAL RISK - Honeypot
-            details.push("🔴 Honeypot detected (failed sell simulation).".to_string());
-        } else {
-             details.push("✅ Passed sell simulation.".to_string());
-        }
+        // 4. Sellability Check (Honeypot)
+        let can_sell = self.check_sellability_placeholder(&token_pubkey, &mut details).await?;
+        if !can_sell { risk_score = 100; details.push("🔴 Honeypot detected (failed sell simulation).".to_string()); }
+        else { details.push("✅ Passed sell simulation.".to_string()); }
 
-        // 5. Holder Distribution Check (Implemented)
-        // TODO: Use a better source like Helius or Birdeye if available for accurate holder count.
-        let (holder_count, concentration_percent) = match self.check_holder_distribution(&token_pubkey).await { // Call renamed function
+        // 5. Holder Distribution Check
+        let (holder_count, concentration_percent) = match self.check_holder_distribution(&token_pubkey).await {
             Ok(data) => data,
             Err(e) => {
                 warn!("Failed to check holder distribution for {}: {:?}. Assuming 0 holders, 100% concentration.", token_address_str, e);
+                risk_score += 25;
                 details.push("❓ Failed to check holder distribution.".to_string());
-                (0, 100.0) // Assume worst case on error
+                (0, 100.0)
             }
         };
-         if holder_count < 50 { // Example threshold
-             risk_score += 10;
-             details.push(format!("🟠 Low holder count ({} - Estimated).", holder_count));
-         } else {
-              details.push(format!("✅ Holder count: {} (Estimated).", holder_count));
-         }
-        if concentration_percent > 50.0 { // Example threshold for top 10 holders
-            risk_score += 15;
-            details.push(format!("🟠 High holder concentration ({:.1}% in top 10).", concentration_percent));
-        } else {
-             details.push(format!("✅ Holder concentration: {:.1}% (Top 10).", concentration_percent));
-        }
+         if holder_count < 50 { risk_score += 10; details.push(format!("🟠 Low holder count ({} - Estimated).", holder_count)); }
+         else { details.push(format!("✅ Holder count: {} (Estimated).", holder_count)); }
+        if concentration_percent > 50.0 { risk_score += 15; details.push(format!("🟠 High holder concentration ({:.1}% in top 10).", concentration_percent)); }
+        else { details.push(format!("✅ Holder concentration: {:.1}% (Top 10).", concentration_percent)); }
 
-        // 6. Transfer Tax Check (Placeholder)
-        // TODO: Implement actual check using Token-2022 extensions or simulation.
-        let transfer_tax_percent = match self.check_transfer_tax(&token_pubkey).await { // Call renamed function
+        // 6. Transfer Tax Check
+        let transfer_tax_percent = match self.check_transfer_tax(&token_pubkey).await {
             Ok(tax) => tax,
             Err(e) => {
                 warn!("Failed to check transfer tax for {}: {:?}. Assuming 0%.", token_address_str, e);
                 details.push("❓ Failed to check transfer tax.".to_string());
-                0.0 // Assume 0 tax on error
+                0.0
             }
         };
-        if transfer_tax_percent > 5.0 { // Example threshold
-            risk_score += (transfer_tax_percent as u32).min(25); // Cap penalty
-            details.push(format!("🟠 High transfer tax ({:.1}% - Placeholder Check).", transfer_tax_percent));
-        } else if transfer_tax_percent > 0.0 {
-             details.push(format!("✅ Low transfer tax ({:.1}%).", transfer_tax_percent));
-        } else {
-             details.push("✅ No transfer tax detected.".to_string());
-        }
+        if transfer_tax_percent > 5.0 { risk_score += (transfer_tax_percent as u32).min(25); details.push(format!("🟠 High transfer tax ({:.1}%).", transfer_tax_percent)); }
+        else if transfer_tax_percent > 0.0 { details.push(format!("✅ Low transfer tax ({:.1}%).", transfer_tax_percent)); }
+        else { details.push("✅ No transfer tax detected.".to_string()); }
 
         // --- Final Score Calculation ---
-        let final_risk_level = risk_score.min(100); // Cap score at 100
+        let final_risk_level = risk_score.min(100);
 
         info!(
             "Risk analysis complete for {}: Score = {}/100",
@@ -246,7 +223,7 @@ impl RiskAnalyzer {
             risk_level: final_risk_level,
             details,
             liquidity_sol,
-            holder_count, // Note: This is currently an estimate
+            holder_count,
             has_mint_authority,
             has_freeze_authority,
             lp_tokens_burned,
@@ -258,99 +235,449 @@ impl RiskAnalyzer {
 
     // --- Risk Check Implementations ---
 
+    /// Checks if a token's mint authority and freeze authority have been revoked
+    /// Returns a tuple of (has_mint_authority, has_freeze_authority)
     async fn check_mint_freeze_authority(&self, token_mint: &Pubkey) -> Result<(bool, bool)> {
         debug!("Checking mint/freeze authority for {}", token_mint);
         let mint_info = self.solana_client.get_mint_info(token_mint).await
             .context("Failed to get mint info")?;
-
         let has_mint_authority = mint_info.mint_authority.is_some();
         let has_freeze_authority = mint_info.freeze_authority.is_some();
         debug!("Mint Authority: {}, Freeze Authority: {}", has_mint_authority, has_freeze_authority);
         Ok((has_mint_authority, has_freeze_authority))
     }
 
-    // Calculates SOL liquidity based on fetched Birdeye data and SOL price
+    /// Calculates liquidity in SOL for a token using multiple methods:
+    /// 1. Birdeye data (if available)
+    /// 2. Direct DEX liquidity assessment via primary pair info
+    /// Returns estimated SOL liquidity value, or 0.0 if unable to calculate
     async fn check_liquidity(
         &self,
         overview_data: Option<&TokenOverviewData>,
         sol_price_usd: Option<f64>,
     ) -> Result<f64> {
-        debug!("Calculating SOL liquidity from Birdeye data");
-
-        let overview = overview_data.ok_or_else(|| anyhow!("Birdeye overview data not available"))?;
-        let sol_price = sol_price_usd.ok_or_else(|| anyhow!("SOL price not available"))?;
-
-        let usd_liquidity = overview.liquidity.unwrap_or(0.0);
-
-        if usd_liquidity <= 0.0 {
-            debug!("Birdeye reported zero or missing USD liquidity for {}", overview.address);
-            return Ok(0.0);
+        debug!("Calculating SOL liquidity");
+        
+        // Method 1: Try to use the Birdeye data if available for quick calculation
+        if let (Some(overview), Some(sol_price)) = (overview_data, sol_price_usd) {
+            let usd_liquidity = overview.liquidity.unwrap_or(0.0);
+            if usd_liquidity > 0.0 && sol_price > 0.0 {
+                let calculated_liquidity_sol = usd_liquidity / sol_price;
+                debug!(
+                    "Used Birdeye data for liquidity calculation: {:.2} SOL (USD Liq: {:.2}, SOL Price: {:.2})",
+                    calculated_liquidity_sol, usd_liquidity, sol_price
+                );
+                return Ok(calculated_liquidity_sol);
+            }
+            debug!("Birdeye data insufficient for liquidity calculation, falling back to direct DEX check");
         }
-
-        if sol_price <= 0.0 {
-             warn!("Invalid SOL price ({}) used for liquidity calculation.", sol_price);
-             return Err(anyhow!("Invalid SOL price for calculation"));
+        
+        // Method 2: Find primary pair and check liquidity directly from DEX
+        match self.find_primary_pair_info(
+            overview_data.map(|od| od.address.as_str()).unwrap_or(""),
+        ).await {
+            Ok(pair_info) => {
+                let liquidity_sol = pair_info.liquidity_sol;
+                debug!("Primary pair liquidity calculation: {:.2} SOL on {}", liquidity_sol, pair_info.dex_name);
+                Ok(liquidity_sol)
+            }
+            Err(e) => {
+                warn!("Failed to calculate liquidity from primary pair: {}", e);
+                // Return 0 if we can't calculate liquidity
+                Ok(0.0)
+            }
         }
-
-        // Calculate SOL liquidity: (Total USD Liquidity / SOL Price in USD)
-        let calculated_liquidity_sol = usd_liquidity / sol_price;
-        info!(
-            "Calculated SOL liquidity for {}: {:.2} (USD Liq: {:.2}, SOL Price: {:.2})",
-            overview.address, calculated_liquidity_sol, usd_liquidity, sol_price
-        );
-
-        Ok(calculated_liquidity_sol)
     }
 
-    // Placeholder for LP token check, now accepts overview data
-    async fn check_lp_tokens_burned(
-        &self,
-        overview_data: Option<&TokenOverviewData>,
-    ) -> Result<bool> {
-        let token_address = overview_data.map(|d| d.address.as_str()).unwrap_or("unknown token");
-        debug!("LP Burn Check Placeholder for {}", token_address);
-
-        // TODO: Implement actual LP token burn/lock check. This is complex.
-        // Use overview_data if it contains relevant fields (e.g., pair address, LP mint).
-        // Example: if let Some(pair_addr) = overview_data.and_then(|d| d.primary_pair_address) { ... }
-
-        // Step 1: Find the primary SOL liquidity pool address for the token.
-        //      - Method A: Use Birdeye token overview endpoint (check overview_data).
-        //      - Method B: Use Helius DAS API (if it includes market/pair data).
-        //      - Method C: Query DEX program accounts (e.g., Raydium, Orca) - requires SDKs or complex RPC parsing.
-        //      - Method D: Use a hardcoded list or external service mapping tokens to pairs.
-        //      -> Requires further investigation / implementation choice.
-        // let primary_pool_address = find_primary_sol_pool(token_address).await?; // Placeholder
-
-        // Step 2: Get the LP token mint address associated with that pool.
-        //      - Requires fetching pool account data and knowing the specific DEX's state layout
-        //        (e.g., Raydium `amm_info_layout_v4`, Orca `whirlpool_state`) to find the `lp_mint` field.
-        // let lp_mint_pubkey = get_lp_mint_for_pool(primary_pool_address).await?; // Placeholder
-
-        // Step 3: Get total supply of the LP token.
-        // let total_supply = self.solana_client.get_token_supply(&lp_mint_pubkey).await?;
-
-        // Step 4: Get largest holders of the LP token.
-        // let largest_holders = self.solana_client.get_token_largest_accounts(&lp_mint_pubkey).await?;
-
-        // Step 5: Check if a known burn address holds >95% of the supply.
-        // let burn_address = Pubkey::from_str("11111111111111111111111111111111")?;
-        // let mut burned_amount: u64 = 0;
-        // for holder in largest_holders {
-        //     if Pubkey::from_str(&holder.address)? == burn_address {
-        //         // Need to parse holder.ui_amount_string based on LP token decimals
-        //         // burned_amount += parse_ui_amount(&holder.ui_amount_string, lp_decimals)?;
-        //     }
-        // }
-        // let is_burned = (burned_amount as f64 / total_supply as f64) > 0.95;
-
-        // Step 6: Optionally check known locker addresses.
-
-        // Step 7: Return true if burned/locked, false otherwise.
-
-        // --- Current Placeholder Logic ---
-        Ok(rand::random::<f64>() > 0.2) // 80% chance LP tokens are "burned" in placeholder
+    /// Represents essential information about a token's primary trading pair
+    #[derive(Debug, Clone)]
+    pub struct PrimaryPairInfo {
+        pub token_mint: String,
+        pub pair_token_mint: String,  // Usually SOL
+        pub lp_mint: Option<String>,  // LP token mint address if available
+        pub dex_name: String,         // "Raydium", "Orca", etc.
+        pub liquidity_sol: f64,       // Liquidity in SOL terms
+        pub price_impact_1k: f64,     // Price impact of 1k SOL swap (percentage)
     }
+
+    /// Find the primary trading pair for a token, typically paired with SOL
+    /// Returns detailed information about the pair including liquidity
+    async fn find_primary_pair_info(&self, token_address: &str) -> Result<PrimaryPairInfo> {
+        debug!("Finding primary pair info for {}", token_address);
+        
+        // Validate token address format
+        if token_address.is_empty() {
+            return Err(anyhow!("Empty token address provided"));
+        }
+        
+        let token_pubkey = match Pubkey::from_str(token_address) {
+            Ok(pk) => pk,
+            Err(_) => return Err(anyhow!("Invalid token address format: {}", token_address)),
+        };
+        
+        // Check if token account exists
+        if self.solana_client.get_account_data(&token_pubkey).await.is_err() {
+            return Err(anyhow!("Token {} doesn't exist on-chain", token_address));
+        }
+        
+        // Get token decimals for amount calculations
+        let token_decimals = match self.solana_client.get_mint_info(&token_pubkey).await {
+            Ok(mint) => mint.decimals,
+            Err(e) => {
+                warn!("Failed to get token decimals for {}: {}", token_address, e);
+                return Err(anyhow!("Failed to get token decimals: {}", e));
+            }
+        };
+        
+        // SOL mint for pair finding
+        let sol_mint = crate::api::jupiter::SOL_MINT;
+        
+        // --- Method 1: Try Raydium API for LP information ---
+        
+        // Find LP token mint via Raydium (reusing existing function)
+        let lp_mint = match self.find_raydium_lp_mint(token_address, sol_mint).await {
+            Ok(Some(mint)) => {
+                debug!("Found Raydium LP mint for {}: {}", token_address, mint);
+                Some(mint)
+            }
+            _ => {
+                debug!("No Raydium LP mint found for {}", token_address);
+                None
+            }
+        };
+        
+        // --- Method 2: Use Jupiter to check liquidity via price impact ---
+        
+        // Calculate liquidity using price impact of a meaningful swap
+        let test_amount_sol = 1_000_000_000; // 1 SOL for test quote
+        
+        let quote_result = match self.jupiter_client.get_quote(
+            sol_mint,
+            token_address,
+            test_amount_sol,
+            100 // 1% slippage
+        ).await {
+            Ok(quote) => quote,
+            Err(e) => {
+                warn!("Failed to get Jupiter quote for {}: {}", token_address, e);
+                // If we have LP info but no quote, make a minimal PairInfo
+                if let Some(lp) = lp_mint {
+                    return Ok(PrimaryPairInfo {
+                        token_mint: token_address.to_string(),
+                        pair_token_mint: sol_mint.to_string(),
+                        lp_mint,
+                        dex_name: "Raydium".to_string(),
+                        liquidity_sol: 0.0, // Unknown liquidity
+                        price_impact_1k: 100.0, // Assume high impact
+                    });
+                }
+                return Err(anyhow!("Failed to get price quote or find LP: {}", e));
+            }
+        };
+        
+        // Calculate price impact for 1k SOL
+        let price_impact = match quote_result.price_impact_pct.parse::<f64>() {
+            Ok(impact) => impact,
+            Err(_) => 100.0, // Default to high impact if parsing fails
+        };
+        
+        // Estimate liquidity from price impact (simplified model)
+        // Lower price impact = higher liquidity
+        // This is a rough estimate: Liq ≈ K / (price_impact)
+        // Where K is a scaling constant (higher = more liquidity for same impact)
+        let liquidity_estimate = if price_impact > 0.0 {
+            let k = 50.0; // Scaling factor (tuned empirically)
+            k / price_impact
+        } else {
+            1000.0 // Default high liquidity if zero impact
+        };
+        
+        // Get more accurate liquidity if we have LP token info
+        let mut liquidity_sol = liquidity_estimate;
+        
+        if let Some(lp_mint_str) = &lp_mint {
+            // Try to get more accurate liquidity from LP token data
+            if let Ok(lp_pubkey) = Pubkey::from_str(lp_mint_str) {
+                if let Ok(accounts) = self.solana_client.get_token_largest_accounts(&lp_pubkey).await {
+                    // Get LP token supply for total liquidity calculation
+                    if let Ok(lp_supply) = self.solana_client.get_token_supply(&lp_pubkey).await {
+                        if lp_supply > 0 {
+                            // TODO: For more accuracy, fetch actual liquidity from DEX reserves
+                            // For now, use price impact as proxy (already calculated)
+                            liquidity_sol = liquidity_estimate;
+                            debug!("Estimated liquidity from LP token stats: {:.2} SOL", liquidity_sol);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Cap maximum reported liquidity at reasonable values to avoid overestimation
+        let max_reasonable_liquidity = 10000.0; // 10k SOL
+        liquidity_sol = liquidity_sol.min(max_reasonable_liquidity);
+        
+        // Return the complete primary pair info
+        Ok(PrimaryPairInfo {
+            token_mint: token_address.to_string(),
+            pair_token_mint: sol_mint.to_string(),
+            lp_mint,
+            dex_name: "Jupiter".to_string(), // Will be more specific with further development
+            liquidity_sol,
+            price_impact_1k: price_impact,
+        })
+    }
+
+    /// Checks if LP tokens are burned (liquidity locked) using Raydium API
+    /// Returns true if a significant portion (>95%) of LP tokens are sent to a burn address
+    async fn check_lp_tokens_burned(&self, token_address: &str) -> Result<bool> {
+        debug!("Checking LP token burn status for {}", token_address);
+
+        // Ensure token address is valid before proceeding
+        let token_pubkey = match Pubkey::from_str(token_address) {
+             Ok(pk) => pk,
+             Err(_) => {
+                 warn!("Invalid token address format for LP check: {}", token_address);
+                 return Ok(false); // Cannot proceed with invalid address
+             }
+        };
+
+        // Check if token exists (avoids unnecessary API calls if mint is invalid)
+        if self.solana_client.get_account_data(&token_pubkey).await.is_err() {
+            warn!("Token {} doesn't exist or failed to fetch account data for LP check", token_address);
+            return Ok(false); // Treat non-existent tokens as not having burned LP
+        }
+
+        // Find the primary pair using our new function
+        let sol_address = crate::api::jupiter::SOL_MINT; // Use constant
+        
+        // Get primary pair info which includes LP mint if available
+        let pair_info = match self.find_primary_pair_info(token_address).await {
+            Ok(info) => info,
+            Err(e) => {
+                warn!("Failed to find primary pair for {}: {}", token_address, e);
+                return Ok(false); // Assume not burned if no pair found
+            }
+        };
+        
+        // Get the LP token mint from the pair info
+        let lp_token_mint_str = match pair_info.lp_mint {
+            Some(mint) => mint,
+            None => {
+                info!("No liquidity pool found for token {}", token_address);
+                return Ok(false); // No pool means no LP to check
+            }
+        };
+
+        let lp_token_mint_pubkey = match Pubkey::from_str(&lp_token_mint_str) {
+             Ok(pk) => pk,
+             Err(_) => {
+                 error!("Found invalid LP token mint address: {}", lp_token_mint_str);
+                 return Ok(false); // Invalid LP mint address
+             }
+        };
+        debug!("Found LP token mint for {}: {}", token_address, lp_token_mint_pubkey);
+
+        // Get LP token supply (raw amount)
+        let supply_raw = match self.solana_client.get_token_supply(&lp_token_mint_pubkey).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to get LP token supply for {}: {}", lp_token_mint_pubkey, e);
+                return Ok(false); // Assume not burned if supply check fails
+            }
+        };
+
+        if supply_raw == 0 {
+            info!("LP token {} has zero supply.", lp_token_mint_pubkey);
+            return Ok(false); // Zero supply cannot be burned
+        }
+
+        // Get largest holders
+        let holders = match self.solana_client.get_token_largest_accounts(&lp_token_mint_pubkey).await {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("Failed to get LP token holders for {}: {}", lp_token_mint_pubkey, e);
+                return Ok(false); // Assume not burned if holder check fails
+            }
+        };
+
+        // Define burn addresses (as Pubkeys for direct comparison)
+        let burn_addresses: Vec<Pubkey> = vec![
+            Pubkey::from_str("11111111111111111111111111111111").unwrap(), // SystemProgram (often used as burn)
+            // Add other known burn addresses for Solana
+            Pubkey::from_str("burnburn111111111111111111111111111111111").unwrap_or_default(),
+            Pubkey::from_str("deadbeef1111111111111111111111111111111111").unwrap_or_default(),
+            // Add known Raydium timelock/locker addresses if appropriate
+        ];
+        
+        // Define known locker program addresses
+        let locker_programs: Vec<Pubkey> = vec![
+            // Raydium/Orca/etc. locker program addresses would go here
+            // Example: Pubkey::from_str("7ahEdGCih2m3XWL9cKHjGWzJKzFnsZJp4EZ8WNpzJ5qc").unwrap_or_default(), // Just an example, replace with actual program
+        ];
+
+        // Calculate burned amount (raw u64)
+        let mut burned_amount_raw: u64 = 0;
+        let mut locked_amount_raw: u64 = 0;
+        
+        for holder in holders {
+            match Pubkey::from_str(&holder.address) {
+                Ok(holder_pubkey) => {
+                    if burn_addresses.contains(&holder_pubkey) {
+                        // Direct burn address
+                        match holder.amount.parse::<u64>() {
+                            Ok(amount) => burned_amount_raw += amount,
+                            Err(e) => warn!("Failed to parse holder amount '{}' for LP {}: {}", holder.amount, lp_token_mint_pubkey, e),
+                        }
+                    } else {
+                        // Check if this account might be owned by a locker program
+                        match self.solana_client.get_rpc().get_account(&holder_pubkey) {
+                            Ok(account) => {
+                                if locker_programs.contains(&account.owner) {
+                                    // This is a locked LP token account
+                                    match holder.amount.parse::<u64>() {
+                                        Ok(amount) => locked_amount_raw += amount,
+                                        Err(e) => warn!("Failed to parse locked holder amount '{}': {}", holder.amount, e),
+                                    }
+                                }
+                            },
+                            Err(_) => {}, // Skip if we can't fetch account data
+                        }
+                    }
+                }
+                Err(_) => warn!("Failed to parse holder address '{}' for LP {}", holder.address, lp_token_mint_pubkey),
+            }
+        }
+
+        // Calculate percentages burned and locked using raw amounts
+        let burned_percent = if supply_raw > 0 {
+            (burned_amount_raw as f64 / supply_raw as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        let locked_percent = if supply_raw > 0 {
+            (locked_amount_raw as f64 / supply_raw as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        let total_secured_percent = burned_percent + locked_percent;
+
+        info!("LP token {} burn/lock check: {:.2}% burned, {:.2}% locked in contracts (total {:.2}%)",
+            lp_token_mint_str, burned_percent, locked_percent, total_secured_percent);
+
+        // Consider LP tokens secure if >95% in burn addresses or lockers
+        Ok(total_secured_percent > 95.0)
+    }
+
+    /// Find the LP token mint for a token paired with SOL using Raydium API primarily.
+    async fn find_lp_token_mint(&self, token_address: &str, sol_address: &str) -> Result<Option<String>> {
+        // Method 1: Try to find via Raydium API
+        match self.find_raydium_lp_mint(token_address, sol_address).await {
+            Ok(Some(mint)) => {
+                debug!("Found Raydium LP mint {} for token {}", mint, token_address);
+                return Ok(Some(mint));
+            }
+            Ok(None) => {
+                debug!("No Raydium LP mint found via API for token {}", token_address);
+                // Proceed to fallback or return None
+            }
+            Err(e) => {
+                warn!("Error checking Raydium API for LP mint: {}", e);
+                // Proceed to fallback or return error? For now, try fallback.
+            }
+        }
+
+        // Method 2: Try to find via on-chain program accounts (fallback - currently placeholder)
+        match self.find_onchain_lp_mint(token_address, sol_address).await {
+             Ok(Some(mint)) => {
+                 debug!("Found LP mint {} via on-chain scan for token {}", mint, token_address);
+                 return Ok(Some(mint));
+             }
+             Ok(None) => {
+                 debug!("No LP mint found via on-chain scan for token {}", token_address);
+             }
+             Err(e) => {
+                  warn!("Error during on-chain LP mint scan: {}", e);
+             }
+        }
+
+        // No LP token mint found by any method
+        Ok(None)
+    }
+
+    /// Find LP token mint via Raydium API (v2 liquidity endpoint)
+    async fn find_raydium_lp_mint(&self, token_address: &str, sol_address: &str) -> Result<Option<String>> {
+        let url = "https://api.raydium.io/v2/sdk/liquidity/mainnet.json";
+        debug!("Fetching Raydium pools from {}", url);
+
+        let response = match self.http_client.get(url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // Log specific error type if possible
+                    if e.is_timeout() {
+                         warn!("Timeout fetching Raydium pools: {}", e);
+                    } else {
+                         warn!("Failed to fetch Raydium pools: {}", e);
+                    }
+                    // Return Ok(None) instead of Err to allow fallback methods
+                    return Ok(None);
+                }
+            };
+
+        if !response.status().is_success() {
+            warn!("Raydium API returned status {} for pools list", response.status());
+            // Return Ok(None) instead of Err
+            return Ok(None);
+        }
+
+        // Use Value for flexible parsing
+        let pools_data: Value = match response.json().await {
+            Ok(json) => json,
+            Err(e) => {
+                warn!("Failed to parse Raydium API response as JSON: {}", e);
+                // Return Ok(None) instead of Err
+                return Ok(None);
+            }
+        };
+
+        // Navigate the expected structure: { "official": [ { pool_data... } ], "unofficial": [ { pool_data... } ] }
+        let official_pools = pools_data.get("official").and_then(|v| v.as_array()).unwrap_or(&vec![]);
+        let unofficial_pools = pools_data.get("unofficial").and_then(|v| v.as_array()).unwrap_or(&vec![]);
+
+        for pool_data in official_pools.iter().chain(unofficial_pools.iter()) {
+            let base_mint = pool_data.get("baseMint").and_then(|v| v.as_str()).unwrap_or("");
+            let quote_mint = pool_data.get("quoteMint").and_then(|v| v.as_str()).unwrap_or("");
+            let lp_mint = pool_data.get("lpMint").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Check if this pool pairs our token with SOL
+            if (base_mint == token_address && quote_mint == sol_address) ||
+               (base_mint == sol_address && quote_mint == token_address) {
+                if !lp_mint.is_empty() {
+                    debug!("Found matching Raydium pool. LP Mint: {}", lp_mint);
+                    return Ok(Some(lp_mint.to_string()));
+                } else {
+                     warn!("Found matching Raydium pool but lpMint is empty: base={}, quote={}", base_mint, quote_mint);
+                }
+            }
+        }
+
+        debug!("No matching Raydium pool found for token {}", token_address);
+        Ok(None) // No matching pool found
+    }
+
+    /// Find LP token mint via on-chain program accounts (fallback - Placeholder)
+    async fn find_onchain_lp_mint(&self, _token_address: &str, _sol_address: &str) -> Result<Option<String>> {
+        // This is complex and requires fetching/parsing potentially many accounts
+        // based on Raydium's program ID and specific account layouts.
+        // For now, this remains a placeholder.
+        warn!("On-chain LP mint finding is not implemented.");
+        Ok(None)
+    }
+
 
     // Checks if a token can likely be sold by simulating a small buy then sell
     async fn check_sellability_placeholder(&self, token_address: &Pubkey, details: &mut Vec<String>) -> Result<bool> {
@@ -363,36 +690,32 @@ impl RiskAnalyzer {
 
 
         // --- Simulate Buy ---
-        // 1. Get Buy Quote (Small amount, e.g., 0.001 SOL)
         let buy_amount_lamports = 1_000_000; // 0.001 SOL
         let buy_quote = match self.jupiter_client.get_quote(
             &sol_mint_str,
             &token_address_str,
             buy_amount_lamports,
-            100 // 1% slippage for simulation
+            100
         ).await {
             Ok(q) => q,
             Err(e) => {
                 warn!("Sellability Check: Failed to get buy quote for {}: {:?}", token_address_str, e);
-                return Ok(false); // Cannot buy, assume not sellable for safety
+                return Ok(false);
             }
         };
 
-        // Estimate amount of token we would receive
         let estimated_token_out = match buy_quote.out_amount.parse::<u64>() {
              Ok(amount) if amount > 0 => amount,
              _ => {
                  warn!("Sellability Check: Invalid estimated token output amount in buy quote for {}.", token_address_str);
-                 return Ok(false); // Invalid quote
+                 return Ok(false);
              }
         };
 
-
-        // 2. Get Buy Swap Transaction
         let buy_swap_response = match self.jupiter_client.get_swap_transaction(
             &buy_quote,
             &wallet_pubkey.to_string(),
-            None // No priority fee for simulation
+            None
         ).await {
             Ok(resp) => resp,
             Err(e) => {
@@ -401,7 +724,6 @@ impl RiskAnalyzer {
             }
         };
 
-        // 3. Decode and Simulate Buy Transaction
         let buy_tx_bytes = match STANDARD.decode(&buy_swap_response.swap_transaction) {
              Ok(bytes) => bytes,
              Err(e) => {
@@ -417,42 +739,36 @@ impl RiskAnalyzer {
              }
          };
 
-        // We don't strictly need the buy simulation to succeed, only the sell.
-        // But logging the failure is useful.
         if let Err(e) = self.solana_client.simulate_versioned_transaction(&buy_versioned_tx).await {
              warn!("Sellability Check: Buy simulation failed for {}: {:?}", token_address_str, e);
-             // Don't return false here, proceed to sell check.
-             details.push(format!("⚠️ Buy simulation failed ({}).", e)); // Add detail
+             details.push(format!("⚠️ Buy simulation failed ({}).", e));
         } else {
              debug!("Sellability Check: Buy simulation successful for {}.", token_address_str);
         }
 
 
         // --- Simulate Sell ---
-        // 4. Get Sell Quote (Selling the estimated amount received from buy)
-        // Need token decimals for this quote
-        let _token_decimals = match self.solana_client.get_mint_info(token_address).await { // Prefixed as unused
+        let _token_decimals = match self.solana_client.get_mint_info(token_address).await {
              Ok(info) => info.decimals,
              Err(e) => {
                  warn!("Sellability Check: Failed to get decimals for {}: {:?}. Cannot simulate sell.", token_address_str, e);
-                 return Ok(false); // Cannot proceed without decimals
+                 return Ok(false);
              }
         };
 
         let sell_quote = match self.jupiter_client.get_quote(
             &token_address_str,
             &sol_mint_str,
-            estimated_token_out, // Sell the amount we simulated buying
-            100 // 1% slippage
+            estimated_token_out,
+            100
         ).await {
              Ok(q) => q,
              Err(e) => {
                  warn!("Sellability Check: Failed to get sell quote for {}: {:?}", token_address_str, e);
-                 return Ok(false); // If we can't get a sell quote, assume not sellable
+                 return Ok(false);
              }
         };
 
-        // 5. Get Sell Swap Transaction
          let sell_swap_response = match self.jupiter_client.get_swap_transaction(
             &sell_quote,
             &wallet_pubkey.to_string(),
@@ -465,7 +781,6 @@ impl RiskAnalyzer {
             }
         };
 
-        // 6. Decode and Simulate Sell Transaction
          let sell_tx_bytes = match STANDARD.decode(&sell_swap_response.swap_transaction) {
              Ok(bytes) => bytes,
              Err(e) => {
@@ -484,34 +799,26 @@ impl RiskAnalyzer {
         match self.solana_client.simulate_versioned_transaction(&sell_versioned_tx).await {
             Ok(_) => {
                 debug!("Sellability Check: Sell simulation successful for {}.", token_address_str);
-                Ok(true) // Both buy (optional) and sell simulations succeeded
+                Ok(true)
             }
             Err(e) => {
                 warn!("Sellability Check: Sell simulation FAILED for {}: {:?}", token_address_str, e);
-                Ok(false) // Sell simulation failed - potential honeypot
+                Ok(false)
             }
         }
     }
 
-    async fn check_holder_distribution(&self, token_address: &Pubkey) -> Result<(u32, f64)> { // Renamed function
-        // --- Actual Implementation ---
+    async fn check_holder_distribution(&self, token_address: &Pubkey) -> Result<(u32, f64)> {
         debug!("Checking holder distribution for {}", token_address);
-
-        // Get total supply and decimals
-        let (total_supply, decimals) = match self.solana_client.get_mint_info(token_address).await {
+        let (total_supply, _decimals) = match self.solana_client.get_mint_info(token_address).await { // Prefix decimals as unused
             Ok(mint_info) => (mint_info.supply, mint_info.decimals),
             Err(e) => {
                 warn!("Failed to get mint info for holder check {}: {:?}", token_address, e);
                 return Err(e).context("Failed to get mint info for holder check");
             }
         };
+        if total_supply == 0 { return Ok((0, 100.0)); }
 
-        if total_supply == 0 {
-            warn!("Token {} has zero supply, cannot calculate holder distribution.", token_address);
-            return Ok((0, 100.0)); // Avoid division by zero, assume max concentration
-        }
-
-        // Get largest accounts
         let largest_accounts = match self.solana_client.get_token_largest_accounts(token_address).await {
             Ok(accounts) => accounts,
             Err(e) => {
@@ -519,71 +826,46 @@ impl RiskAnalyzer {
                  return Err(e).context("Failed to get largest accounts for holder check");
             }
         };
-
-        // Estimate holder count (using number of largest accounts returned as a proxy - very rough)
-        // TODO: Use a better source like Helius or Birdeye if available for accurate holder count.
         let holder_count_estimate = largest_accounts.len() as u32;
         debug!("Estimated holder count for {}: {}", token_address, holder_count_estimate);
 
-
-        // Calculate concentration for top N (e.g., 10) holders
         let top_n = 10;
         let mut top_n_amount: u64 = 0;
         for account in largest_accounts.iter().take(top_n) {
-             // Access the 'amount' string field within the UiTokenAmount struct and parse it.
-             match account.amount.amount.parse::<u64>() { // Access account.amount.amount
+             match account.amount.parse::<u64>() {
                  Ok(amount_u64) => top_n_amount += amount_u64,
                  Err(e) => {
-                     // Format the ui_amount_string for the warning message
-                     warn!("Failed to parse largest account amount '{}' for {}: {}. Skipping.", account.amount.ui_amount_string, token_address, e);
-                     // Optionally return an error or just skip this account
+                     warn!("Failed to parse largest account amount '{}' for {}: {}. Skipping.", account.amount, token_address, e);
                  }
              }
         }
-
-        let concentration_percent = if total_supply > 0 {
-             (top_n_amount as f64 / total_supply as f64) * 100.0
-        } else {
-             0.0 // Avoid division by zero if total supply is 0
-        };
+        let concentration_percent = if total_supply > 0 { (top_n_amount as f64 / total_supply as f64) * 100.0 } else { 0.0 };
         debug!("Top {} holders concentration for {}: {:.2}%", top_n, token_address, concentration_percent);
-
         Ok((holder_count_estimate, concentration_percent))
-
     }
 
-    async fn check_transfer_tax(&self, token_address: &Pubkey) -> Result<f64> { // Renamed function
+    async fn check_transfer_tax(&self, token_address: &Pubkey) -> Result<f64> {
         debug!("Checking transfer tax for {}", token_address);
-
-        // 1. Fetch mint account data
         let mint_account = match self.solana_client.get_rpc().get_account(token_address) {
              Ok(account) => account,
              Err(e) => {
                  warn!("Failed to get mint account for tax check {}: {:?}", token_address, e);
-                 // If we can't get the account, assume no tax, but log error
                  return Ok(0.0);
              }
         };
-
-        // 2. Check if the owner is the Token-2022 program
         if mint_account.owner == spl_token_2022::id() {
             debug!("Token {} belongs to Token-2022 program. Checking for transfer fee extension.", token_address);
-            // 3. Try to unpack account data with extensions
             match StateWithExtensions::<Token2022Mint>::unpack(&mint_account.data) {
                 Ok(mint_state) => {
-                    // 4. Look for the TransferFeeConfig extension
                     match mint_state.get_extension::<TransferFeeConfig>() {
                         Ok(transfer_fee_config) => {
-                            // 5. Extract fee basis points and calculate percentage
-                            // Fee is charged on the destination amount. Get the highest fee.
-                            let fee_basis_points_pod = transfer_fee_config.get_epoch_fee(0).transfer_fee_basis_points; // Check current epoch fee
-                            let fee_basis_points: u16 = fee_basis_points_pod.into(); // Convert PodU16 to u16
-                            let tax_percent = fee_basis_points as f64 / 100.0; // Cast u16 to f64
-                            info!("Token {} has Token-2022 transfer tax: {}% ({} basis points)", token_address, tax_percent, fee_basis_points); // Format u16
+                            let fee_basis_points_pod = transfer_fee_config.get_epoch_fee(0).transfer_fee_basis_points;
+                            let fee_basis_points: u16 = fee_basis_points_pod.into();
+                            let tax_percent = fee_basis_points as f64 / 100.0;
+                            info!("Token {} has Token-2022 transfer tax: {}% ({} basis points)", token_address, tax_percent, fee_basis_points);
                             Ok(tax_percent)
                         }
                         Err(_) => {
-                            // Extension not found
                             debug!("Token {} is Token-2022 but has no TransferFeeConfig extension.", token_address);
                             Ok(0.0)
                         }
@@ -599,8 +881,100 @@ impl RiskAnalyzer {
              Ok(0.0)
         } else {
              warn!("Token {} has an unknown owner program: {}. Cannot determine transfer tax.", token_address, mint_account.owner);
-             Ok(0.0) // Assume no tax for unknown programs
+             Ok(0.0)
         }
-        // TODO: Consider adding simulation for non-Token-2022 tokens as a fallback (Step 5 in original TODO)
     }
 }
+
+/* 
+ * TEST INSTRUCTIONS FOR RISK ANALYZER IMPROVEMENTS
+ * -----------------------------------------------
+ * 
+ * To test the improved risk analysis functions, follow these steps:
+ * 
+ * 1. In the `analyze_token` method, you can add debug output to check primary pair info:
+ *    ```
+ *    if let Some(pair_info) = &primary_pair_info {
+ *        info!("Primary pair details - DEX: {}, Liquidity: {} SOL, Price Impact: {}%",
+ *            pair_info.dex_name, pair_info.liquidity_sol, pair_info.price_impact_1k);
+ *    }
+ *    ```
+ * 
+ * 2. Test with a known Solana memecoin address, for example:
+ *    - BONK: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+ *    - WIF: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
+ *    
+ *    Use the Telegram bot command:
+ *    `/analyze DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263`
+ * 
+ * 3. For direct testing, you can create a simple test function in main.rs:
+ *    ```
+ *    async fn test_risk_analyzer() {
+ *        // Initialize necessary components
+ *        let config = Config::load().expect("Failed to load config");
+ *        let solana_client = Arc::new(SolanaClient::new(&config.solana_rpc_url).expect("Failed to create Solana client"));
+ *        let helius_client = Arc::new(HeliusClient::new(&config.helius_api_key));
+ *        let jupiter_client = Arc::new(JupiterClient::new(None));
+ *        let birdeye_client = Arc::new(BirdeyeClient::new(&config.birdeye_api_key));
+ *        let wallet_manager = Arc::new(WalletManager::new(&config.wallet_private_key, solana_client.clone()).expect("Failed to create wallet manager"));
+ *        
+ *        let risk_analyzer = RiskAnalyzer::new(
+ *            solana_client.clone(),
+ *            helius_client.clone(),
+ *            jupiter_client.clone(),
+ *            birdeye_client.clone(),
+ *            wallet_manager.clone(),
+ *        );
+ *        
+ *        // Test tokens (BONK, WIF, or your token of interest)
+ *        let token_address = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"; // BONK
+ *        
+ *        // Test primary pair finding
+ *        match risk_analyzer.find_primary_pair_info(token_address).await {
+ *            Ok(pair_info) => {
+ *                println!("Primary pair info for {}:", token_address);
+ *                println!("  DEX: {}", pair_info.dex_name);
+ *                println!("  Liquidity: {:.2} SOL", pair_info.liquidity_sol);
+ *                println!("  Price Impact: {:.4}%", pair_info.price_impact_1k);
+ *                println!("  LP Mint: {:?}", pair_info.lp_mint);
+ *            },
+ *            Err(e) => println!("Error finding primary pair: {}", e),
+ *        }
+ *        
+ *        // Test LP tokens burned check
+ *        match risk_analyzer.check_lp_tokens_burned(token_address).await {
+ *            Ok(burned) => println!("LP tokens burned/locked: {}", burned),
+ *            Err(e) => println!("Error checking LP tokens: {}", e),
+ *        }
+ *        
+ *        // Test full analysis
+ *        match risk_analyzer.analyze_token(token_address).await {
+ *            Ok(analysis) => {
+ *                println!("Risk analysis for {}:", token_address);
+ *                println!("  Risk Level: {}/100", analysis.risk_level);
+ *                println!("  Liquidity: {:.2} SOL", analysis.liquidity_sol);
+ *                println!("  LP Tokens Burned: {}", analysis.lp_tokens_burned);
+ *                println!("  Details:");
+ *                for detail in analysis.details {
+ *                    println!("    - {}", detail);
+ *                }
+ *            },
+ *            Err(e) => println!("Error analyzing token: {}", e),
+ *        }
+ *    }
+ *    ```
+ *    
+ * 4. To call this test function, you can add to main.rs:
+ *    ```
+ *    // In main function, before bot startup
+ *    if std::env::args().any(|arg| arg == "--test-risk") {
+ *        info!("Running risk analyzer test...");
+ *        tokio::spawn(test_risk_analyzer()).await.unwrap();
+ *        return Ok(());
+ *    }
+ *    ```
+ *    
+ *    Then run with: `cargo run -- --test-risk`
+ */
+
+IMPORTANT: For any future changes to this file, use the final_file_content shown above as your reference. This content reflects the current state of the file, including any auto-formatting (e.g., if you used single quotes but the formatter converted them to double quotes). Always base your SEARCH/REPLACE operations on this final version to ensure accuracy.

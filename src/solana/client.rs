@@ -1,38 +1,88 @@
-use anyhow::{Context, Result}; // Import the Context trait
-use solana_client::{
-    client_error::ClientErrorKind, // Import ClientErrorKind for retry logic
-    rpc_client::RpcClient,
-    rpc_config::{RpcSendTransactionConfig, RpcSimulateTransactionConfig},
-    rpc_response::{RpcSimulateTransactionResult, RpcTokenAccountBalance},
-};
+use anyhow::{anyhow, Context, Result};
+use std::sync::Arc;
+use std::str::FromStr;
+use std::time::Duration;
+use std::future::Future;
+use tracing::{info, warn, debug, error};
 use solana_sdk::{
     commitment_config::{CommitmentConfig, CommitmentLevel},
-    program_pack::Pack,
     pubkey::Pubkey,
-    signature::Signature,
-    transaction::VersionedTransaction, // Added VersionedTransaction
+    signature::{Signature},
+    transaction::{VersionedTransaction, TransactionError},
 };
-use spl_associated_token_account::get_associated_token_address;
+use solana_client::{
+    nonblocking::rpc_client::RpcClient,
+    client_error::ClientError,
+    rpc_config::{RpcTransactionConfig, RpcSimulateTransactionConfig},
+    rpc_response::{RpcSimulateTransactionResult, RpcTokenAccountBalance, EncodedConfirmedTransactionWithStatusMeta},
+};
+use solana_transaction_status::UiTransactionEncoding;
 use spl_token::state::{Account as TokenAccount, Mint};
-use std::{str::FromStr, sync::Arc, time::Duration};
-use tokio_retry::{strategy::{ExponentialBackoff, jitter}, Retry}; // Import retry components
-use tracing::{debug, error, info, warn};
-// Removed duplicate: use anyhow::{Context, Result};
+use spl_associated_token_account::get_associated_token_address;
+use tokio::time::sleep;
+use rand::Rng;
 
 use crate::error::TraderbotError;
 
-// Use Arc for shared ownership if the client needs to be shared across threads
-#[derive(Clone)] // Removed Debug derive
+/// Helper function to retry an async operation with exponential backoff
+async fn with_retries<T, F, Fut>(operation: F, max_retries: u32, initial_delay_ms: u64) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T>>, // Closure returns Result<T, anyhow::Error>
+{
+    let mut attempt = 0;
+    let mut delay_ms = initial_delay_ms;
+
+    loop {
+        attempt += 1;
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                if attempt >= max_retries {
+                    return Err(e.context(format!("Failed after {} retries", max_retries)));
+                }
+                
+                debug!("Retry {}/{}: {}. Delaying {}ms before next attempt.", 
+                    attempt, max_retries, e, delay_ms);
+                
+                sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = (delay_ms * 2).min(10000); // Double delay, cap at 10s
+            }
+        }
+    }
+}
+
+/// Simpler retry function (used occasionally)
+async fn retry<T, F, Fut>(f: F, max_attempts: u32, description: &str) -> Result<T>
+where
+    F: Fn() -> Fut + Send,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match f().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                if attempt >= max_attempts {
+                    return Err(e.context(format!("{} failed after {} attempts", description, max_attempts)));
+                }
+                warn!("{} attempt {}/{} failed: {}. Retrying...", description, attempt, max_attempts, e);
+                sleep(Duration::from_millis(500 * attempt as u64)).await;
+            }
+        }
+    }
+}
+
+/// Wrapper around Solana's RpcClient that adds retry logic and error handling.
 pub struct SolanaClient {
-    rpc_client: Arc<RpcClient>, // Use Arc for shared ownership
+    rpc_client: Arc<RpcClient>,
 }
 
 impl SolanaClient {
     pub fn new(rpc_url: &str) -> Result<Self> {
-        // Use confirmed commitment for reads, but allow specifying for transactions
         let commitment_config = CommitmentConfig::confirmed();
         let rpc_client = RpcClient::new_with_commitment(rpc_url.to_string(), commitment_config);
-        // Optional: Add connection check
         match rpc_client.get_latest_blockhash() {
             Ok(_) => info!("Successfully connected to Solana RPC: {}", rpc_url),
             Err(e) => {
@@ -44,66 +94,39 @@ impl SolanaClient {
                 .into());
             }
         }
-
         Ok(Self {
             rpc_client: Arc::new(rpc_client),
         })
     }
 
-    // Helper to run blocking RPC calls in a tokio task, extracting the value from RpcResponse
+    // Modified run_blocking to use the custom with_retries function
     async fn run_blocking<F, T>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(Arc<RpcClient>) -> solana_client::client_error::Result<T> + Send + 'static, // Use the client_error::Result type directly
+        // Closure now takes Arc<RpcClient> and returns the specific solana_client::Result
+        F: Fn(Arc<RpcClient>) -> solana_client::client_error::Result<T> + Send + Sync + Clone + 'static,
         T: Send + 'static,
     {
-        let retry_strategy = ExponentialBackoff::from_millis(100) // Start with 100ms delay
-            .map(jitter) // Add jitter to avoid thundering herd
-            .take(3); // Try up to 3 times (total 4 attempts)
-
-        Retry::spawn(retry_strategy, || {
-            let client = self.rpc_client.clone();
-            let f_clone = f.clone(); // Clone the closure if it needs to be Fn
-
-            async move {
-                let result = tokio::task::spawn_blocking(move || f_clone(client))
-                    .await? // Handle JoinError
-                    .map_err(|e| {
-                        // Check if the error is retryable
-                        let is_retryable = matches!(e.kind(), ClientErrorKind::Reqwest(_) | ClientErrorKind::RpcError(_)); // Add more kinds if needed
-                        if is_retryable {
-                             warn!("Solana RPC call failed, retrying... Error: {:?}", e);
-                        } else {
-                             error!("Non-retryable Solana RPC client error: {:?}", e);
-                        }
-                        // Convert ClientError to anyhow::Error using TraderbotError as intermediate
-                        TraderbotError::SolanaError(format!("RPC Client Error: {}", e))
-                    });
-
-                // Only retry if the error was deemed retryable by map_err logic
-                match result {
-                    Ok(value) => Ok(value),
-                    Err(e) if e.to_string().contains("retrying") => Err(e), // Propagate error to trigger retry
-                    Err(e) => {
-                        // If not retryable, wrap it to stop retries
-                        Err(tokio_retry::Error::Permanent(e))
-                    }
+        with_retries(
+            || { // The operation closure passed to with_retries
+                let client = self.rpc_client.clone();
+                let f_clone = f.clone();
+                async move { // The future returned by the operation closure
+                    tokio::task::spawn_blocking(move || f_clone(client))
+                        .await // Await the JoinHandle
+                        .map_err(|e| anyhow!("Tokio task JoinError: {}", e))? // Handle JoinError, convert to anyhow::Error
+                        .map_err(|e| anyhow!("RPC client error: {}", e)) // Map solana_client::Error to anyhow::Error
                 }
-            }
-        })
-        .await
-        .map_err(|e| match e {
-             // Extract the permanent error if retry failed permanently
-             tokio_retry::Error::Permanent(inner_err) => inner_err,
-             // If it exhausted retries, return the last error encountered
-             tokio_retry::Error::Operation { error, .. } => error,
-        })
+            },
+            3, // Max attempts (total 4 tries)
+            100 // Initial delay in ms
+        ).await
     }
 
 
     pub async fn get_sol_balance(&self, pubkey: &Pubkey) -> Result<f64> {
-        let pubkey_copy = *pubkey; // Copy the Pubkey value
+        let pubkey_copy = *pubkey;
         let lamports = self
-            .run_blocking(move |client| client.get_balance(&pubkey_copy)) // Move the copy into the closure
+            .run_blocking(move |client| client.get_balance(&pubkey_copy))
             .await?;
         let sol_balance = lamports as f64 / 1_000_000_000.0;
         Ok(sol_balance)
@@ -113,18 +136,14 @@ impl SolanaClient {
         let account_data = self.get_account_data(token_account_pubkey).await?;
         let token_account = TokenAccount::unpack(&account_data)
             .map_err(|e| TraderbotError::SolanaError(format!("Failed to unpack token account: {}", e)))?;
-
-        // To get decimals, we need the mint info
         let mint_info = self.get_mint_info(&token_account.mint).await?;
         let decimals = mint_info.decimals;
-
         Ok((token_account.amount, decimals))
     }
 
      pub async fn get_token_balance_ui(&self, token_account_pubkey: &Pubkey) -> Result<f64> {
         let (amount, decimals) = self.get_token_balance(token_account_pubkey).await?;
-        // Use amount_to_ui_amount to convert lamports (u64) to UI representation (f64)
-        Ok(spl_token::amount_to_ui_amount(amount, decimals)) // Correct function
+        Ok(spl_token::amount_to_ui_amount(amount, decimals))
      }
 
     pub async fn get_token_supply(&self, mint_pubkey: &Pubkey) -> Result<u64> {
@@ -133,8 +152,6 @@ impl SolanaClient {
             .run_blocking(move |client| client.get_token_supply(&mint_pubkey_copy))
             .await
             .context("Failed to get token supply RPC response")?;
-
-        // Parse the amount string from UiTokenAmount into u64
         ui_amount.amount.parse::<u64>().context(format!(
             "Failed to parse token supply amount '{}' into u64",
             ui_amount.amount
@@ -143,18 +160,18 @@ impl SolanaClient {
 
     pub async fn get_token_largest_accounts(&self, mint_pubkey: &Pubkey) -> Result<Vec<RpcTokenAccountBalance>> {
         let mint_pubkey_copy = *mint_pubkey;
-        // This RPC call might return a large list, consider pagination if needed
         self.run_blocking(move |client| client.get_token_largest_accounts(&mint_pubkey_copy))
             .await
             .context("Failed to get token largest accounts")
     }
 
+    // Updated to use run_blocking with retries
     pub async fn get_account_data(&self, pubkey: &Pubkey) -> Result<Vec<u8>> {
-        // get_account returns Result<Account>, not RpcResult<Account>
-        let account = self.rpc_client.get_account(pubkey).map_err(|e| {
-             error!("Failed to get account data for {}: {:?}", pubkey, e);
-             TraderbotError::SolanaError(format!("Failed to get account {}: {}", pubkey, e))
-        })?;
+        let pubkey_copy = *pubkey;
+        let account = self
+            .run_blocking(move |client| client.get_account(&pubkey_copy))
+            .await
+            .context(format!("Failed to get account data for {}", pubkey_copy))?;
         Ok(account.data)
     }
 
@@ -173,116 +190,111 @@ impl SolanaClient {
         get_associated_token_address(wallet_address, token_mint_address)
     }
 
-    // Sends a VersionedTransaction without confirmation
+    // Updated to use with_retries directly
     pub async fn send_versioned_transaction(
         &self,
         transaction: &VersionedTransaction,
     ) -> Result<Signature> {
-         let config = RpcSendTransactionConfig {
-            skip_preflight: false, // Perform preflight checks
+        let config = RpcSendTransactionConfig {
+            skip_preflight: false,
             preflight_commitment: Some(CommitmentLevel::Confirmed),
-            encoding: Some(solana_transaction_status::UiTransactionEncoding::Base64), // Specify encoding
-            max_retries: Some(5), // Retry sending a few times
+            encoding: Some(solana_transaction_status::UiTransactionEncoding::Base64),
+            max_retries: Some(0), // Set RPC client retries to 0, handle retries ourselves
             min_context_slot: None,
         };
-        // send_transaction_with_config returns Result<Signature>, not RpcResult
-        let signature = self.rpc_client.send_transaction_with_config(transaction, config).map_err(|e| {
-             error!("Failed to send transaction: {:?}", e);
-             TraderbotError::TransactionError(format!("Send failed: {}", e))
-        })?;
-
-        debug!("Transaction sent with signature: {}", signature);
-        Ok(signature)
+        
+        // Clone to pass into the retry function
+        let transaction_clone = transaction.clone();
+        let rpc_client = self.rpc_client.clone();
+        
+        with_retries(
+            move || {
+                let tx = transaction_clone.clone();
+                let client = rpc_client.clone();
+                let config = config.clone();
+                
+                async move {
+                    match client.send_transaction_with_config(&tx, config) {
+                        Ok(sig) => {
+                            debug!("Transaction sent with signature: {}", sig);
+                            Ok(sig)
+                        },
+                        Err(e) => {
+                            // Filter which errors should be retried
+                            if Self::should_retry_transaction_error(&e) {
+                                warn!("Retriable transaction error: {:?}", e);
+                                Err(anyhow!("Retriable transaction error: {}", e))
+                            } else {
+                                error!("Non-retriable transaction error: {:?}", e);
+                                Err(TraderbotError::TransactionError(format!("Send failed (non-retriable): {}", e)).into())
+                            }
+                        }
+                    }
+                }
+            },
+            4, // Max attempts
+            500 // Initial delay in ms (longer for transactions)
+        ).await
     }
 
-
-    // Confirms a transaction with a timeout
-    pub async fn confirm_transaction(
-        &self,
-        signature: &Signature,
-        _commitment: CommitmentLevel, // Prefixed as it's not directly used in current logic
-        timeout_secs: u64,
-    ) -> Result<()> {
-        let start_time = std::time::Instant::now();
-        loop {
-            // get_signature_statuses returns Result<Response<Vec<Option<TransactionStatus>>>>
-            let statuses_response = self.rpc_client.get_signature_statuses(&[*signature]).map_err(|e| {
-                 error!("Failed to get signature status for {}: {:?}", signature, e);
-                 TraderbotError::SolanaError(format!("Status check failed: {}", e))
-            })?;
-
-            // Extract the status from the Response and Vec
-            let status = statuses_response.value.get(0).cloned().flatten(); // Get Option<TransactionStatus>
-
-            match status.map(|s| s.err) { // Check the err field within TransactionStatus
-                Some(None) => { // Status received, no error field
-                    info!("Transaction {} confirmed.", signature);
-                    return Ok(());
-                }
-                Some(Some(e)) => { // Status received, contains a TransactionError
-                    error!("Transaction {} failed: {:?}", signature, e);
-                    return Err(TraderbotError::TransactionError(format!(
-                        "Transaction failed: {:?}", e
-                    )).into());
-                }
-                None => { // Status not yet available or Vec was empty
-                    debug!("Transaction {} status not yet available...", signature);
-                }
-            }
-
-
-            if start_time.elapsed() > Duration::from_secs(timeout_secs) {
-                warn!("Timeout waiting for transaction {} confirmation", signature);
-                return Err(TraderbotError::TransactionError(
-                    "Confirmation timeout".to_string(),
-                )
-                .into());
-            }
-
-            tokio::time::sleep(Duration::from_secs(2)).await; // Poll interval
-        }
-    }
-
-    // Simulate a versioned transaction
+    // Updated to use with_retries directly
     pub async fn simulate_versioned_transaction(
         &self,
         transaction: &VersionedTransaction,
     ) -> Result<RpcSimulateTransactionResult> {
-         let config = RpcSimulateTransactionConfig {
-            sig_verify: false, // Signature verification is handled before simulation usually
-            replace_recent_blockhash: true, // Use a recent blockhash for simulation
-            commitment: Some(CommitmentConfig::confirmed()), // Use CommitmentConfig
-            encoding: Some(solana_transaction_status::UiTransactionEncoding::Base64), // Specify encoding
-            accounts: None, // Not needed for basic simulation
+        let config = RpcSimulateTransactionConfig {
+            sig_verify: false,
+            replace_recent_blockhash: true,
+            commitment: Some(CommitmentConfig::confirmed()),
+            encoding: Some(solana_transaction_status::UiTransactionEncoding::Base64),
+            accounts: None,
             min_context_slot: None,
-            inner_instructions: false, // Added missing field
+            inner_instructions: false,
         };
-
-        // simulate_transaction_with_config returns Result<Response<RpcSimulateTransactionResult>>
-        let simulation_response = self.rpc_client.simulate_transaction_with_config(transaction, config).map_err(|e| {
-             error!("Failed to send simulation request: {:?}", e);
-             TraderbotError::TransactionError(format!("Simulation request failed: {}", e))
-        })?;
-
-        let simulation_result = simulation_response.value; // Extract value from Response
-
+        
+        // Clone to pass into the retry function
+        let transaction_clone = transaction.clone();
+        let rpc_client = self.rpc_client.clone();
+        
+        let simulation_response = with_retries(
+            move || {
+                let tx = transaction_clone.clone();
+                let client = rpc_client.clone();
+                let config = config.clone();
+                
+                async move {
+                    match client.simulate_transaction_with_config(&tx, config) {
+                        Ok(resp) => Ok(resp),
+                        Err(e) => {
+                            if Self::should_retry_rpc_error(&e) {
+                                warn!("Retriable simulation error: {:?}", e);
+                                Err(anyhow!("Retriable simulation error: {}", e))
+                            } else {
+                                error!("Non-retriable simulation error: {:?}", e);
+                                Err(TraderbotError::TransactionError(format!("Simulation request failed (non-retriable): {}", e)).into())
+                            }
+                        }
+                    }
+                }
+            },
+            3, // Max attempts
+            200 // Initial delay in ms
+        ).await?;
+        
+        let simulation_result = simulation_response.value;
         if let Some(err) = &simulation_result.err {
             error!("Transaction simulation failed: {:?}", err);
-             return Err(TraderbotError::TransactionError(format!("Simulation failed: {:?}", err)).into());
+            return Err(TraderbotError::TransactionError(format!("Simulation failed: {:?}", err)).into());
         } else {
             debug!("Transaction simulation successful. Logs: {:?}", simulation_result.logs);
         }
-
         Ok(simulation_result)
     }
 
-
-    // Placeholder for resolving token address (requires external data source)
     pub async fn resolve_token_address(&self, address_or_symbol: &str) -> Result<Pubkey> {
         match Pubkey::from_str(address_or_symbol) {
             Ok(pubkey) => Ok(pubkey),
             Err(_) => {
-                // TODO: Implement lookup using a token list (e.g., Jupiter's list) or API
                 warn!(
                     "Token symbol lookup not implemented. Failed to resolve: {}",
                     address_or_symbol
@@ -292,8 +304,182 @@ impl SolanaClient {
         }
     }
 
-     // Get the underlying RpcClient if direct access is needed (use with caution)
-    pub fn get_rpc(&self) -> Arc<RpcClient> {
+     pub fn get_rpc(&self) -> Arc<RpcClient> {
         self.rpc_client.clone()
+    }
+
+    // Enhanced with better retry and error handling
+    pub async fn confirm_transaction(
+        &self,
+        signature: &Signature,
+        commitment: CommitmentLevel,
+        timeout_secs: u64,
+    ) -> Result<()> {
+        let start_time = std::time::Instant::now();
+        let signature_copy = *signature;
+        
+        // The max time we'll wait
+        let deadline = start_time + Duration::from_secs(timeout_secs);
+        
+        // Initial backoff values
+        let mut retry_delay_ms = 1000; // Start with 1 second
+        let max_delay_ms = 5000; // Cap at 5 seconds
+        
+        loop {
+            // Use with_retries for the get_signature_statuses call
+            let statuses_result = with_retries(
+                move || {
+                    let sig = signature_copy;
+                    let client = self.rpc_client.clone();
+                    
+                    async move {
+                        match client.get_signature_statuses(&[sig]) {
+                            Ok(response) => Ok(response),
+                            Err(e) => {
+                                if Self::should_retry_rpc_error(&e) {
+                                    Err(anyhow!("Retriable status check error: {}", e))
+                                } else {
+                                    Err(TraderbotError::SolanaError(format!("Status check failed (non-retriable): {}", e)).into())
+                                }
+                            }
+                        }
+                    }
+                },
+                2, // Max attempts for status check
+                100 // Initial delay in ms
+            ).await;
+            
+            match statuses_result {
+                Ok(statuses_response) => {
+                    let status = statuses_response.value.get(0).cloned().flatten();
+                    match status.map(|s| s.err) {
+                        Some(None) => {
+                            info!("Transaction {} confirmed.", signature_copy);
+                            return Ok(());
+                        }
+                        Some(Some(e)) => {
+                            error!("Transaction {} failed: {:?}", signature_copy, e);
+                            return Err(TraderbotError::TransactionError(format!(
+                                "Transaction failed: {:?}", e
+                            )).into());
+                        }
+                        None => {
+                            // Not yet confirmed, continue waiting
+                            debug!("Transaction {} status not yet available...", signature_copy);
+                        }
+                    }
+                },
+                Err(e) => {
+                    // If we hit a serious error in status checking, log it but continue
+                    // if we haven't reached timeout
+                    warn!("Error checking transaction status: {:?}", e);
+                }
+            }
+            
+            // Check timeout
+            if std::time::Instant::now() > deadline {
+                warn!("Timeout waiting for transaction {} confirmation after {}s", 
+                    signature_copy, timeout_secs);
+                return Err(TraderbotError::TransactionError(
+                    format!("Confirmation timeout after {}s", timeout_secs)
+                ).into());
+            }
+            
+            // Exponential backoff with cap
+            let jitter = rand::random::<u64>() % (retry_delay_ms / 10);
+            let sleep_time = retry_delay_ms.saturating_add(jitter);
+            tokio::time::sleep(Duration::from_millis(sleep_time)).await;
+            
+            // Increase delay for next iteration (capped)
+            retry_delay_ms = (retry_delay_ms * 3 / 2).min(max_delay_ms);
+        }
+    }
+
+    pub async fn get_transaction(
+        &self,
+        signature: &Signature,
+        commitment: CommitmentConfig,
+    ) -> Result<EncodedConfirmedTransactionWithStatusMeta> {
+        let config = RpcTransactionConfig {
+            encoding: Some(UiTransactionEncoding::Json),
+            commitment: Some(commitment),
+            max_supported_transaction_version: Some(0),
+        };
+        
+        // Clone for async move
+        let rpc_client = self.rpc_client.clone();
+        let signature_copy = *signature;
+        
+        with_retries(
+            move || {
+                let client = rpc_client.clone();
+                let sig = signature_copy;
+                let cfg = config.clone();
+                
+                async move {
+                    match client.get_transaction_with_config(&sig, cfg) {
+                        Ok(tx) => Ok(tx),
+                        Err(e) => {
+                            if Self::should_retry_rpc_error(&e) {
+                                Err(anyhow!("Retriable error getting transaction: {}", e))
+                            } else {
+                                Err(TraderbotError::SolanaError(format!("Failed to get transaction: {}", e)).into())
+                            }
+                        }
+                    }
+                }
+            },
+            3, // Max retries
+            200 // Initial delay in ms
+        ).await
+    }
+
+    // Helper function to determine if an RPC error should be retried
+    fn should_retry_rpc_error(error: &ClientError) -> bool {
+        match error.kind() {
+            ErrorKind::RpcError(err_str) => {
+                // Check for common retryable error strings
+                let err_str = err_str.to_lowercase();
+                err_str.contains("rate limit") || 
+                err_str.contains("429") ||
+                err_str.contains("timeout") ||
+                err_str.contains("503") ||
+                err_str.contains("504") ||
+                err_str.contains("server error") ||
+                err_str.contains("too many requests")
+            },
+            ErrorKind::Reqwest(_) => {
+                // Network errors are generally retryable
+                true
+            },
+            ErrorKind::TransportError(_) => {
+                // Transport errors are often temporary
+                true
+            },
+            _ => false
+        }
+    }
+
+    // Helper to determine if a transaction error should be retried
+    fn should_retry_transaction_error(error: &ClientError) -> bool {
+        // Extract TransactionError if present
+        if let Some(transaction_error) = error.get_transaction_error() {
+            match transaction_error {
+                TransactionError::BlockhashNotFound |
+                TransactionError::AccountInUse |
+                TransactionError::AccountLoadedTwice |
+                TransactionError::InstructionError(_, _) |
+                TransactionError::AlreadyProcessed => true,
+                _ => false
+            }
+        } else {
+            // Check the error string for hints
+            let error_str = error.to_string().to_lowercase();
+            error_str.contains("blockhash not found") ||
+            error_str.contains("already processed") ||
+            error_str.contains("timeout") ||
+            // Check if this could be a network error
+            Self::should_retry_rpc_error(error)
+        }
     }
 }

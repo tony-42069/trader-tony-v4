@@ -1,22 +1,27 @@
-use anyhow::{anyhow, Context, Result}; // Added Context
-use chrono::Utc; // Added Utc
-use rand; // Added rand explicitly
-use std::{collections::HashMap, str::FromStr, sync::Arc}; // Added FromStr
+use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::str::FromStr;
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::{interval, Duration};
+use tokio::time::{sleep, interval};
+use chrono::Utc;
 use tracing::{debug, error, info, warn}; // Added debug
 
 use crate::api::birdeye::BirdeyeClient; // Add BirdeyeClient import
 use crate::api::helius::HeliusClient;
-use crate::api::jupiter::{JupiterClient, SwapResult}; // Added SwapResult
-use crate::config::Config;
-use crate::models::token::TokenMetadata;
+use crate::api::jupiter::{JupiterClient, SwapResult};
 use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
+use crate::config::Config;
 use crate::trading::position::{PositionManager, PositionStatus}; // Assuming these exist
 use crate::trading::risk::{RiskAnalysis, RiskAnalyzer}; // Assuming these exist
-use crate::trading::strategy::Strategy; // Assuming this exists
-// Removed: use crate::error::TraderbotError;
+use crate::trading::strategy::{Strategy, self as strategy_persistence}; // Using persistence module
+use crate::models::token::TokenMetadata;
+use solana_sdk::signature::Signature;
+use solana_sdk::pubkey::Pubkey;
 
 
 // --- Standalone Task Functions ---
@@ -82,6 +87,7 @@ async fn run_scan_cycle(
                                         &jupiter_client,
                                         &wallet_manager, // Pass WalletManager which holds SolanaClient
                                         &config,
+                                        None, // Pass None for notification_manager
                                     ).await {
                                         Ok(_) => info!("Successfully executed buy and confirmed for {} via strategy '{}'", token.symbol, strategy.name),
                                         Err(e) => error!("Failed to execute buy for {}: {:?}", token.symbol, e), // Error includes confirmation failure now
@@ -258,6 +264,7 @@ async fn execute_buy_task(
     jupiter_client: &JupiterClient, // Pass Arc<JupiterClient>
     wallet_manager: &WalletManager, // Pass Arc<WalletManager> (holds SolanaClient)
     config: &Config, // Pass Arc<Config>
+    notification_manager: Option<&Arc<crate::bot::notification::NotificationManager>>, // Add optional notification_manager
 ) -> Result<SwapResult> { // Return SwapResult
     info!(
         "Executing buy for token {} ({}) using strategy '{}'",
@@ -295,7 +302,7 @@ async fn execute_buy_task(
 
     // --- Confirm Transaction ---
     info!("Confirming buy transaction: {}", swap_result.transaction_signature);
-    let signature = solana_sdk::signature::Signature::from_str(&swap_result.transaction_signature)
+    let signature = Signature::from_str(&swap_result.transaction_signature)
         .context("Failed to parse buy transaction signature")?;
 
     // Use the SolanaClient from WalletManager to confirm
@@ -307,6 +314,33 @@ async fn execute_buy_task(
             // --- Create Position Entry (Only after confirmation) ---
             // TODO: Get actual out amount after confirmation if possible (requires parsing tx details)
             let actual_out_amount = swap_result.actual_out_amount_ui.unwrap_or(swap_result.out_amount_ui); // Use estimate for now
+            
+            // Check fill rate - if it's too low, warn the user
+            let fill_rate = if swap_result.out_amount_ui > 0.0 {
+                (actual_out_amount / swap_result.out_amount_ui) * 100.0
+            } else {
+                100.0 // Default to 100% if expected is 0
+            };
+            
+            // Log warning if fill rate is low
+            if fill_rate < 95.0 {
+                warn!(
+                    "Low fill rate detected: Received {:.4} tokens ({:.1}% of expected {:.4})",
+                    actual_out_amount, fill_rate, swap_result.out_amount_ui
+                );
+                
+                // Send notification for significantly low fill rate
+                if fill_rate < 50.0 && notification_manager.is_some() {
+                    if let Some(notification_manager) = notification_manager {
+                        notification_manager.send_error_alert(
+                            &format!("⚠️ Very low fill rate in trade: only {:.1}% filled", fill_rate),
+                            &format!("Trade for {} only received {:.4} tokens ({:.1}% of expected {:.4})", 
+                                token.symbol, actual_out_amount, fill_rate, swap_result.out_amount_ui
+                            )
+                        ).await;
+                    }
+                }
+            }
 
             position_manager.create_position(
                 &token.address,
@@ -316,13 +350,14 @@ async fn execute_buy_task(
                 &strategy.id,
                 position_size_sol, // Entry value in SOL
                 actual_out_amount, // Amount of token received
+                Some(swap_result.out_amount_ui), // Expected amount as a separate parameter
                 swap_result.price_impact_pct,
                 &swap_result.transaction_signature,
                 // Pass SL/TP/Trailing settings from strategy
                 strategy.stop_loss_percent,
                 strategy.take_profit_percent,
                 strategy.trailing_stop_percent,
-                strategy.max_hold_time_minutes,
+                Some(strategy.max_hold_time_minutes), // Wrap in Some()
             ).await.context("Failed to create position entry after successful swap confirmation")?;
 
             info!(
@@ -350,13 +385,16 @@ pub struct AutoTrader {
     solana_client: Arc<SolanaClient>,
     helius_client: Arc<HeliusClient>, // Use Arc for clients too if shared
     jupiter_client: Arc<JupiterClient>, // Use Arc
-    pub risk_analyzer: Arc<RiskAnalyzer>, // Made public for access from command handler
-    pub position_manager: Arc<PositionManager>, // Made public for access from command handler
+    birdeye_client: Arc<BirdeyeClient>,
+    config: Arc<Config>,
+    pub position_manager: Arc<PositionManager>, // Expose for references
+    pub risk_analyzer: Arc<RiskAnalyzer>, // Expose for /analyze commands
+    is_running: Arc<AtomicBool>,
+    notification_manager: Option<Arc<crate::bot::notification::NotificationManager>>,
     strategies: Arc<RwLock<HashMap<String, Strategy>>>, // Use Arc<RwLock<..>> for shared mutable state
     running: Arc<RwLock<bool>>, // Use Arc<RwLock<..>>
-    config: Arc<Config>, // Use Arc
-    // Add handle for the background task for graceful shutdown
     task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    strategies_path: PathBuf,
 }
 
 impl AutoTrader {
@@ -388,29 +426,186 @@ impl AutoTrader {
             solana_client.clone(),
             config.clone(),
         )); // Corrected syntax: Ensure this parenthesis closes Arc::new
-
-        Ok(Self { // Wrap return in Ok()
+        
+        // Set the default path for strategy persistence
+        let strategies_path = PathBuf::from("data/strategies.json");
+        
+        // Create AutoTrader instance
+        let autotrader = Self {
             wallet_manager,
             solana_client,
             helius_client,
             jupiter_client,
-            risk_analyzer,
-            position_manager, // Assign the Arc<PositionManager>
-            strategies: Arc::new(RwLock::new(HashMap::new())),
-            running: Arc::new(RwLock::new(false)),
+            birdeye_client,
             config,
+            position_manager,
+            risk_analyzer,
+            is_running: Arc::new(AtomicBool::new(false)),
+            notification_manager: None,
+            strategies: Arc::new(RwLock::new(HashMap::new())), // Start with empty map, will load in init
+            running: Arc::new(RwLock::new(false)),
             task_handle: Arc::new(Mutex::new(None)),
-        }) // Add missing closing brace for Ok(Self { ... })
-    } // This brace closes the `new` function
+            strategies_path,
+        };
+        
+        // Initialize by loading strategies
+        match tokio::runtime::Handle::current().block_on(autotrader.load_strategies()) {
+            Ok(_) => {
+                info!("AutoTrader initialized successfully with strategies loaded");
+                Ok(autotrader)
+            },
+            Err(e) => {
+                error!("Failed to load strategies during AutoTrader initialization: {}", e);
+                Err(e)
+            }
+        }
+    }
 
     // --- Strategy Management ---
+    
+    /// Loads strategies from disk
+    async fn load_strategies(&self) -> Result<()> {
+        info!("Loading strategies from {:?}", self.strategies_path);
+        
+        let loaded_strategies = if self.strategies_path.exists() {
+            match tokio::fs::read_to_string(&self.strategies_path).await {
+                Ok(data) => {
+                    if data.is_empty() {
+                        HashMap::new()
+                    } else {
+                        match serde_json::from_str::<HashMap<String, Strategy>>(&data) {
+                            Ok(strategies) => strategies,
+                            Err(e) => {
+                                error!("Failed to parse strategies file: {}", e);
+                                HashMap::new()
+                            }
+                        }
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to read strategies file: {}", e);
+                    HashMap::new()
+                }
+            }
+        } else {
+            // File doesn't exist yet
+            HashMap::new()
+        };
+        
+        // Update the in-memory HashMap
+        let mut strategies = self.strategies.write().await;
+        *strategies = loaded_strategies;
+        
+        info!("Loaded {} strategies", strategies.len());
+        Ok(())
+    }
+    
+    /// Saves strategies to disk
+    async fn save_strategies(&self) -> Result<()> {
+        debug!("Saving strategies to {:?}", self.strategies_path);
+        
+        // Get the current strategies
+        let strategies = self.strategies.read().await;
+        
+        // Ensure directory exists
+        if let Some(parent) = self.strategies_path.parent() {
+            if !parent.exists() {
+                tokio::fs::create_dir_all(parent).await
+                    .context("Failed to create directory for strategies file")?;
+            }
+        }
+        
+        // Serialize to JSON
+        let json = serde_json::to_string_pretty(&*strategies)
+            .context("Failed to serialize strategies")?;
+        
+        // Write to file
+        tokio::fs::write(&self.strategies_path, json).await
+            .context("Failed to write strategies file")?;
+        
+        debug!("Saved {} strategies to disk", strategies.len());
+        Ok(())
+    }
 
+    /// Adds a new strategy to the AutoTrader
     pub async fn add_strategy(&self, strategy: Strategy) -> Result<()> {
+        // Validate the strategy first
+        if let Err(validation_error) = strategy.validate() {
+            return Err(anyhow!("Invalid strategy: {}", validation_error));
+        }
+        
+        // Add strategy to the in-memory HashMap
         let mut strategies = self.strategies.write().await;
         info!("Adding strategy: {} ({})", strategy.name, strategy.id);
         strategies.insert(strategy.id.clone(), strategy);
-        // TODO: Persist strategies (e.g., to DB or file)
+        drop(strategies); // Release lock before saving
+        
+        // Save strategies to disk
+        self.save_strategies().await?;
+        
         Ok(())
+    }
+    
+    /// Updates an existing strategy
+    pub async fn update_strategy(&self, strategy: Strategy) -> Result<()> {
+        // Validate the strategy first
+        if let Err(validation_error) = strategy.validate() {
+            return Err(anyhow!("Invalid strategy: {}", validation_error));
+        }
+        
+        // Check if the strategy exists before updating
+        let mut strategies = self.strategies.write().await;
+        if !strategies.contains_key(&strategy.id) {
+            return Err(anyhow!("Strategy with ID {} not found", strategy.id));
+        }
+        
+        // Update the strategy
+        info!("Updating strategy: {} ({})", strategy.name, strategy.id);
+        strategies.insert(strategy.id.clone(), strategy);
+        drop(strategies); // Release lock before saving
+        
+        // Save strategies to disk
+        self.save_strategies().await?;
+        
+        Ok(())
+    }
+    
+    /// Toggles a strategy's enabled state
+    pub async fn toggle_strategy(&self, strategy_id: &str) -> Result<bool> {
+        // Get the strategy
+        let mut strategies = self.strategies.write().await;
+        let strategy = strategies.get_mut(strategy_id)
+            .ok_or_else(|| anyhow!("Strategy not found: {}", strategy_id))?;
+        
+        // Toggle the enabled flag
+        strategy.enabled = !strategy.enabled;
+        let new_status = strategy.enabled;
+        drop(strategies);
+        
+        // Save changes to disk
+        self.save_strategies().await?;
+        
+        info!("Strategy {} {} status: {}", strategy_id, 
+            if new_status { "enabled" } else { "disabled" },
+            new_status);
+        
+        Ok(new_status)
+    }
+    
+    /// Deletes a strategy by ID
+    pub async fn delete_strategy(&self, id: &str) -> Result<()> {
+        // Remove the strategy from the in-memory HashMap
+        let mut strategies = self.strategies.write().await;
+        if let Some(strategy) = strategies.remove(id) {
+            info!("Deleted strategy: {} ({})", strategy.name, strategy.id);
+            drop(strategies); // Release lock before saving
+            
+            // Save strategies to disk
+            self.save_strategies().await?;
+            Ok(())
+        } else {
+            Err(anyhow!("Strategy with ID {} not found", id))
+        }
     }
 
     pub async fn get_strategy(&self, id: &str) -> Option<Strategy> {
@@ -423,7 +618,11 @@ impl AutoTrader {
         strategies.values().cloned().collect()
     }
 
-    // TODO: Add update_strategy, remove_strategy methods
+    /// Sets the notification manager for trade alerts
+    pub fn set_notification_manager(&mut self, notification_manager: Arc<crate::bot::notification::NotificationManager>) {
+        self.notification_manager = Some(notification_manager);
+        info!("Notification manager attached to AutoTrader");
+    }
 
     // --- Control Methods ---
 
@@ -629,6 +828,121 @@ impl AutoTrader {
 
         Ok(stats)
     }
+
+    /// Executes a manual buy (snipe) triggered by a command.
+    pub async fn execute_manual_buy(
+        &self,
+        token_address: &str,
+        amount_sol: f64,
+        // We need access to clients/managers, assuming they are available via self
+    ) -> Result<SwapResult> {
+        info!("Executing manual snipe for token {} with {} SOL", token_address, amount_sol);
+
+        // 1. Get necessary token metadata (decimals primarily for Jupiter)
+        //    We could fetch from Birdeye overview again, or rely on SolanaClient::get_mint_info
+        let mint_info = self.solana_client.get_mint_info(&Pubkey::from_str(token_address)?)
+            .await.context("Snipe: Failed to get mint info for decimals")?;
+        let token_decimals = mint_info.decimals;
+        // Use address as symbol/name for now, or fetch more details if needed
+        let token_symbol = token_address.chars().take(6).collect::<String>();
+        let token_name = format!("Manual Snipe {}", token_symbol);
+
+
+        // 2. Execute Swap using JupiterClient
+        //    Use default slippage/priority fee from config
+        let swap_result = self.jupiter_client.swap_sol_to_token(
+            token_address,
+            token_decimals,
+            amount_sol,
+            self.config.default_slippage_bps,
+            Some(self.config.default_priority_fee_micro_lamports),
+            self.wallet_manager.clone(), // Pass Arc<WalletManager>
+        ).await.context(format!("Snipe: Failed to execute SOL to {} swap", token_symbol))?;
+
+        info!(
+            "Snipe swap sent for {}. Signature: {}, Estimated Out: {:.6}",
+            token_symbol, swap_result.transaction_signature, swap_result.out_amount_ui
+        );
+
+        // 3. Confirm Transaction
+        info!("Snipe: Confirming transaction: {}", swap_result.transaction_signature);
+        let signature = Signature::from_str(&swap_result.transaction_signature)
+            .context("Snipe: Failed to parse transaction signature")?;
+
+        match self.solana_client.confirm_transaction(&signature, solana_sdk::commitment_config::CommitmentLevel::Confirmed, 90).await { // Increased timeout slightly
+            Ok(_) => {
+                info!("Snipe transaction {} confirmed successfully.", signature);
+
+                // 4. Create Position Entry (using defaults for SL/TP etc.)
+                let actual_out_amount = swap_result.actual_out_amount_ui.unwrap_or(swap_result.out_amount_ui);
+                
+                // Check fill rate - if it's too low, warn the user
+                let fill_rate = if swap_result.out_amount_ui > 0.0 {
+                    (actual_out_amount / swap_result.out_amount_ui) * 100.0
+                } else {
+                    100.0 // Default to 100% if expected is 0
+                };
+                
+                // Log warning if fill rate is low
+                if fill_rate < 95.0 {
+                    warn!(
+                        "Snipe: Low fill rate detected: Received {:.4} tokens ({:.1}% of expected {:.4})",
+                        actual_out_amount, fill_rate, swap_result.out_amount_ui
+                    );
+                    
+                    // Send notification for significantly low fill rate
+                    if fill_rate < 50.0 && self.notification_manager.is_some() {
+                        if let Some(ref notification_manager) = self.notification_manager {
+                            notification_manager.send_error_alert(
+                                &format!("⚠️ Very low fill rate in snipe: only {:.1}% filled", fill_rate),
+                                &format!("Snipe for {} only received {:.4} tokens ({:.1}% of expected {:.4})", 
+                                    token_symbol, actual_out_amount, fill_rate, swap_result.out_amount_ui
+                                )
+                            ).await;
+                        }
+                    }
+                }
+
+                self.position_manager.create_position(
+                    token_address,
+                    &token_name,
+                    &token_symbol,
+                    token_decimals,
+                    "MANUAL_SNIPE", // Use a specific strategy ID for manual snipes
+                    amount_sol, // Entry value in SOL
+                    actual_out_amount, // Amount of token received
+                    Some(swap_result.out_amount_ui), // Expected amount as a separate parameter
+                    swap_result.price_impact_pct,
+                    &swap_result.transaction_signature,
+                    None, // No default SL
+                    None, // No default TP
+                    None, // No default Trailing Stop
+                    None, // No default Max Hold Time
+                ).await.context("Snipe: Failed to create position entry after successful swap confirmation")?;
+
+                info!(
+                    "Snipe: Position created for {} ({}) with {:.4} SOL entry value.",
+                    token_name, token_symbol, amount_sol
+                );
+
+                // Send trade notification if notification manager is available
+                if let Some(notification_manager) = &self.notification_manager {
+                    // Get the position we just created - use a position finder by token
+                    let positions = self.position_manager.get_positions_by_token(token_address).await?;
+                    if let Some(position) = positions.first() {
+                        notification_manager.send_trade_notification(position, true).await;
+                    }
+                }
+
+                Ok(swap_result) // Return original swap result on success
+            }
+            Err(e) => {
+                error!("Snipe: Failed to confirm transaction {}: {:?}", signature, e);
+                Err(e).context(format!("Snipe transaction {} failed confirmation", signature))
+            }
+        }
+    }
+
 } // This brace closes the impl AutoTrader block
 
 // Note: Removed the manual Clone implementation as it was complex and likely incorrect.

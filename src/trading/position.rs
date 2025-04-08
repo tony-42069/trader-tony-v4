@@ -31,6 +31,8 @@ pub enum PositionStatus {
     EmergencyClose, // e.g., Rug pull detected
     Failed,         // e.g., Sell transaction failed
     Closed,         // Successfully sold and recorded
+    ClosedManually, // Closed manually by user command
+    Liquidated,     // Liquidated (not applicable for spot)
 }
 
 impl std::fmt::Display for PositionStatus {
@@ -46,6 +48,8 @@ impl std::fmt::Display for PositionStatus {
             Self::EmergencyClose => write!(f, "Emergency Close"),
             Self::Failed => write!(f, "Failed"),
             Self::Closed => write!(f, "Closed"),
+            Self::ClosedManually => write!(f, "Closed Manually"),
+            Self::Liquidated => write!(f, "Liquidated"),
         }
     }
 }
@@ -62,6 +66,8 @@ pub struct Position {
     pub exit_time: Option<DateTime<Utc>>,    // Exit time
     pub entry_value_sol: f64,                // Initial value in SOL (amount bought)
     pub entry_token_amount: f64,             // Amount of token received at entry
+    pub expected_token_amount: f64,          // Expected amount of token (for partial fills)
+    pub fill_percent: f64,                   // Percentage filled (entry_token_amount/expected_token_amount)
     pub exit_value_sol: Option<f64>,         // Value in SOL received at exit
     pub entry_price_sol: f64,                // Entry price (SOL per Token)
     pub current_price_sol: f64,              // Current price (SOL per Token)
@@ -74,10 +80,12 @@ pub struct Position {
     pub trailing_stop_percent: Option<u32>,  // Trailing stop percentage (used to update price)
     pub highest_price: f64,                  // Highest price seen since entry
     pub status: PositionStatus,              // Position status
-    pub entry_tx_sig: String,                // Entry transaction signature
-    pub exit_tx_sig: Option<String>,         // Exit transaction signature
+    pub entry_tx_signature: String,          // Entry transaction signature
+    pub exit_tx_signature: Option<String>,   // Exit transaction signature
     pub is_demo: bool,                       // Whether position is demo
-    pub max_hold_time_minutes: u32,          // Maximum hold time in minutes
+    pub max_hold_time_minutes: Option<u32>,  // Maximum hold time in minutes (optional)
+    pub stop_loss_percent: Option<u32>,
+    pub take_profit_percent: Option<u32>,
 }
 
 // Removed Debug derive as SolanaClient doesn't implement it
@@ -215,12 +223,13 @@ impl PositionManager {
         strategy_id: &str,
         entry_value_sol: f64,
         entry_token_amount: f64,
+        expected_token_amount: Option<f64>, // Optional expected amount for partial fills
         _price_impact_pct: f64, // Prefixed as unused
         entry_tx_sig: &str,
         stop_loss_percent: Option<u32>,
         take_profit_percent: Option<u32>,
         trailing_stop_percent: Option<u32>,
-        max_hold_time_minutes: u32,
+        max_hold_time_minutes: Option<u32>, // Changed to Option<u32>
     ) -> Result<Position> {
         let now = Utc::now();
 
@@ -229,6 +238,22 @@ impl PositionManager {
         }
         // Calculate entry price: SOL per Token
         let entry_price_sol = entry_value_sol / entry_token_amount;
+
+        // Calculate fill percentage
+        let expected = expected_token_amount.unwrap_or(entry_token_amount);
+        let fill_percent = if expected > 0.0 {
+            (entry_token_amount / expected) * 100.0
+        } else {
+            100.0 // Default to 100% if expected is 0 or negative
+        };
+
+        // Log if this is a partial fill
+        if fill_percent < 99.9 {
+            info!(
+                "Partial fill detected for {}: Got {} tokens ({:.2}% of expected {})",
+                token_symbol, entry_token_amount, fill_percent, expected
+            );
+        }
 
         let stop_loss_price = stop_loss_percent.map(|sl| entry_price_sol * (1.0 - (sl as f64 / 100.0)));
         let take_profit_price = take_profit_percent.map(|tp| entry_price_sol * (1.0 + (tp as f64 / 100.0)));
@@ -247,6 +272,8 @@ impl PositionManager {
             exit_time: None,
             entry_value_sol,
             entry_token_amount,
+            expected_token_amount: expected,
+            fill_percent: fill_percent / 100.0, // Store as 0.0-1.0
             exit_value_sol: None,
             entry_price_sol,
             current_price_sol: entry_price_sol, // Start current price at entry price
@@ -259,19 +286,23 @@ impl PositionManager {
             trailing_stop_percent, // Store the percentage
             highest_price: entry_price_sol, // Initial highest price is entry price
             status: PositionStatus::Active,
-            entry_tx_sig: entry_tx_sig.to_string(),
-            exit_tx_sig: None,
+            entry_tx_signature: entry_tx_sig.to_string(),
+            exit_tx_signature: None,
             is_demo: self.config.demo_mode,
             max_hold_time_minutes,
+            stop_loss_percent,
+            take_profit_percent,
         };
 
         info!(
-            "Creating new position (ID: {}): {} ({}) | Entry SOL: {:.4} | Entry Tokens: {:.4} | Entry Price: {:.6} SOL/Token | SL: {:?} | TP: {:?} | Trail: {:?}",
+            "Creating new position (ID: {}): {} ({}) | Entry SOL: {:.4} | Entry Tokens: {:.4}/{:.4} ({:.1}%) | Entry Price: {:.6} SOL/Token | SL: {:?} | TP: {:?} | Trail: {:?}",
             position.id,
             position.token_name,
             position.token_symbol,
             position.entry_value_sol,
             position.entry_token_amount,
+            position.expected_token_amount,
+            position.fill_percent * 100.0,
             position.entry_price_sol,
             position.stop_loss_price,
             position.take_profit_price,
@@ -285,6 +316,83 @@ impl PositionManager {
         self.save_positions().await?;
 
         Ok(position)
+    }
+
+    // New method to update a position with actual fill amount if it was initially created with an estimate
+    pub async fn update_position_fill_amount(
+        &self,
+        position_id: &str,
+        actual_token_amount: f64,
+    ) -> Result<Position> {
+        let mut positions = self.positions.write().await;
+        let position = positions.get_mut(position_id)
+            .ok_or_else(|| TraderbotError::PositionError(format!("Position ID {} not found for fill update", position_id)))?;
+        
+        // Only update if position is still active
+        if position.status != PositionStatus::Active {
+            return Err(anyhow!("Cannot update fill amount for non-active position: {}", position_id));
+        }
+        
+        // No need to update if amounts are the same
+        if (position.entry_token_amount - actual_token_amount).abs() < 0.000001 {
+            return Ok(position.clone());
+        }
+        
+        // Calculate new fill percentage
+        let fill_percent = if position.expected_token_amount > 0.0 {
+            actual_token_amount / position.expected_token_amount
+        } else {
+            1.0 // Default to 100% if expected is 0
+        };
+        
+        // Calculate new entry price (SOL per token)
+        let entry_price_sol = if actual_token_amount > 0.0 {
+            position.entry_value_sol / actual_token_amount
+        } else {
+            position.entry_price_sol // Keep original if we somehow got 0 tokens
+        };
+        
+        // Log the update
+        info!(
+            "Updating position fill (ID: {}): {} tokens -> {} tokens ({:.1}% fill rate) | New price: {:.6} SOL/Token",
+            position_id,
+            position.entry_token_amount,
+            actual_token_amount,
+            fill_percent * 100.0,
+            entry_price_sol
+        );
+        
+        // Update position
+        position.entry_token_amount = actual_token_amount;
+        position.fill_percent = fill_percent;
+        position.entry_price_sol = entry_price_sol;
+        position.current_price_sol = entry_price_sol; // Also update current price
+        
+        // Recalculate stop loss and take profit prices
+        if let Some(sl_percent) = position.stop_loss_percent {
+            position.stop_loss_price = Some(entry_price_sol * (1.0 - (sl_percent as f64 / 100.0)));
+        }
+        
+        if let Some(tp_percent) = position.take_profit_percent {
+            position.take_profit_price = Some(entry_price_sol * (1.0 + (tp_percent as f64 / 100.0)));
+        }
+        
+        // Update trailing stop if set
+        if let Some(ts_percent) = position.trailing_stop_percent {
+            position.trailing_stop_price = Some(entry_price_sol * (1.0 - (ts_percent as f64 / 100.0)));
+        }
+        
+        // Update highest price if needed
+        if position.highest_price < entry_price_sol {
+            position.highest_price = entry_price_sol;
+        }
+        
+        let updated_position = position.clone();
+        drop(positions); // Release lock before saving
+        
+        self.save_positions().await?;
+        
+        Ok(updated_position)
     }
 
     pub async fn create_demo_position(
@@ -308,12 +416,13 @@ impl PositionManager {
             strategy_id,
             amount_sol,
             token_amount,
+            None, // No expected amount for demo positions
             0.1, // Dummy price impact
             &format!("DEMO_ENTRY_{}", Uuid::new_v4()),
             Some(15), // 15% SL
             Some(50), // 50% TP
             Some(5),  // 5% Trailing SL
-            240,      // 4 hours max hold
+            Some(240),      // 4 hours max hold (Wrapped in Some)
         ).await
     }
 
@@ -340,7 +449,7 @@ impl PositionManager {
         position.status = status; // Use the provided final status (Closed, Failed, etc.)
         position.exit_price_sol = Some(exit_price_sol);
         position.exit_value_sol = Some(exit_value_sol);
-        position.exit_tx_sig = Some(exit_tx_sig.to_string());
+        position.exit_tx_signature = Some(exit_tx_sig.to_string());
 
         // Calculate final PnL
         let pnl_sol = exit_value_sol - position.entry_value_sol;
@@ -435,11 +544,13 @@ impl PositionManager {
             }
         }
 
-        // Check max hold time
-        let hold_duration = Utc::now().signed_duration_since(position.entry_time);
-        if hold_duration >= ChronoDuration::minutes(position.max_hold_time_minutes as i64) {
-             info!("Max hold time reached for {}: Held for {} mins", position.token_symbol, hold_duration.num_minutes());
-            return Some(PositionStatus::MaxHoldTimeReached);
+        // Check max hold time (only if it's set)
+        if let Some(max_minutes) = position.max_hold_time_minutes {
+            let hold_duration = Utc::now().signed_duration_since(position.entry_time);
+            if hold_duration >= ChronoDuration::minutes(max_minutes as i64) {
+                 info!("Max hold time reached for {}: Held for {} mins (Limit: {} mins)", position.token_symbol, hold_duration.num_minutes(), max_minutes);
+                return Some(PositionStatus::MaxHoldTimeReached);
+            }
         }
 
         None // No exit condition met
@@ -448,29 +559,38 @@ impl PositionManager {
 
     // --- Getters ---
 
-    pub async fn get_position(&self, position_id: &str) -> Option<Position> {
+    pub async fn get_position(&self, id: &str) -> Option<Position> {
         let positions = self.positions.read().await;
-        positions.get(position_id).cloned()
+        positions.get(id).cloned()
+    }
+    
+    /// Gets all positions for a specific token
+    pub async fn get_positions_by_token(&self, token_address: &str) -> Result<Vec<Position>> {
+        let positions = self.positions.read().await;
+        let matching_positions: Vec<Position> = positions.values()
+            .filter(|p| p.token_address == token_address)
+            .cloned()
+            .collect();
+        
+        Ok(matching_positions)
     }
 
+    /// Gets all active positions
     pub async fn get_active_positions(&self) -> Vec<Position> {
         let positions = self.positions.read().await;
-        positions
-            .values()
-            .filter(|p| p.status == PositionStatus::Active || p.status == PositionStatus::Closing) // Include Closing status
+        positions.values()
+            .filter(|p| p.status == PositionStatus::Active)
             .cloned()
             .collect()
     }
 
-     pub async fn has_active_position(&self, token_address: &str) -> bool {
+     /// Gets all positions (active and closed)
+     pub async fn get_all_positions(&self) -> Vec<Position> {
         let positions = self.positions.read().await;
-        positions.values().any(|p|
-            p.token_address == token_address &&
-            (p.status == PositionStatus::Active || p.status == PositionStatus::Closing)
-        )
+        positions.values().cloned().collect()
     }
 
-
+    /// Gets all active positions for a specific strategy
     pub async fn get_active_positions_by_strategy(&self, strategy_id: &str) -> Vec<Position> {
         let positions = self.positions.read().await;
         positions
@@ -480,9 +600,12 @@ impl PositionManager {
             .collect()
     }
 
-    pub async fn get_all_positions(&self) -> Vec<Position> {
+    pub async fn has_active_position(&self, token_address: &str) -> bool {
         let positions = self.positions.read().await;
-        positions.values().cloned().collect()
+        positions.values().any(|p|
+            p.token_address == token_address &&
+            (p.status == PositionStatus::Active || p.status == PositionStatus::Closing)
+        )
     }
 
     // --- Monitoring Task ---
@@ -708,14 +831,6 @@ impl PositionManager {
         if let Err(e) = self.save_positions().await {
              error!("Failed to save positions after management cycle: {:?}", e);
         }
-
-
-        // Saving happens within close_position and potentially after updates if needed,
-        // but a final save ensures consistency.
-        if let Err(e) = self.save_positions().await {
-             error!("Failed to save positions after management cycle: {:?}", e);
-        }
-
 
         Ok(())
     }

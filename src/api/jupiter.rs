@@ -1,15 +1,22 @@
 use anyhow::{anyhow, Context, Result};
-use reqwest::Client;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::Utc;
+use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
+use solana_sdk::{
+    pubkey::Pubkey,
+    signature::Signature,
+};
 use std::{
     sync::Arc,
     time::Duration,
+    str::FromStr,
 };
 use tracing::{debug, error, info, warn}; // Added warn
-use base64::{engine::general_purpose::STANDARD, Engine as _}; // Import Engine trait globally for the file
 
 use crate::solana::wallet::WalletManager;
 use crate::error::TraderbotError; // Assuming error enum exists
+use crate::solana::client::SolanaClient; // Add import for SolanaClient
 
 const JUPITER_BASE_URL: &str = "https://quote-api.jup.ag/v6";
 pub const SOL_MINT: &str = "So11111111111111111111111111111111111111112"; // Made public
@@ -309,9 +316,14 @@ impl JupiterClient {
             .context("Failed to sign and send swap transaction")?;
         info!("Swap transaction sent: {}", signature);
 
-        // 4. TODO: Confirm transaction and get actual output amount from logs/balance change.
-        // This requires parsing transaction details after confirmation.
-        let actual_out_amount_ui = None; // Placeholder
+        // 4. Get actual output amount after transaction confirmation
+        let actual_out_amount_ui = self.get_actual_amount_from_transaction(
+            &signature.to_string(),
+            quote.input_mint.as_str(),
+            quote.output_mint.as_str(),
+            token_decimals,
+            &wallet_manager.solana_client()
+        ).await?;
 
         Ok(SwapResult {
             input_mint: SOL_MINT.to_string(),
@@ -381,8 +393,14 @@ impl JupiterClient {
             .context("Failed to sign and send swap transaction")?;
         info!("Swap transaction sent: {}", signature);
 
-        // 4. TODO: Confirm transaction and get actual output amount.
-        let actual_out_amount_ui = None; // Placeholder
+        // 4. Get actual output amount after transaction confirmation
+        let actual_out_amount_ui = self.get_actual_amount_from_transaction(
+            &signature.to_string(),
+            quote.input_mint.as_str(),
+            quote.output_mint.as_str(),
+            9, // SOL has 9 decimals
+            &wallet_manager.solana_client()
+        ).await?;
 
         Ok(SwapResult {
             input_mint: token_mint.to_string(),
@@ -393,6 +411,104 @@ impl JupiterClient {
             price_impact_pct: price_impact,
             transaction_signature: signature.to_string(),
         })
+    }
+
+    // Helper method to get actual token amount from a transaction receipt
+    async fn get_actual_amount_from_transaction(
+        &self,
+        signature: &str,
+        input_mint: &str,
+        output_mint: &str,
+        output_decimals: u8,
+        solana_client: &SolanaClient,
+    ) -> Result<Option<f64>> {
+        // Try to get transaction details
+        let tx_details = match solana_client.get_transaction(
+            &Signature::from_str(signature)?, // Use FromStr trait
+            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+        ).await {
+            Ok(details) => details,
+            Err(e) => {
+                warn!("Could not get transaction details for tx {}: {}", signature, e);
+                return Ok(None); // Return None if we can't get details
+            }
+        };
+
+        // Check if transaction succeeded
+        if let Some(meta) = &tx_details.meta {
+            if let Some(err) = &meta.err {
+                warn!("Transaction {} failed with error: {:?}", signature, err);
+                return Ok(None);
+            }
+            
+            // Look at post token balances to find the actual amount received
+            if let Some(post_balances) = &meta.post_token_balances {
+                // Get the wallet public key
+                let wallet_key = match tx_details.transaction.message.account_keys.get(0) {
+                    Some(key) => key.to_string(),
+                    None => {
+                        warn!("Could not get wallet key from transaction {}", signature);
+                        return Ok(None);
+                    }
+                };
+                
+                // Find the token account for the output token owned by the wallet
+                let token_account = post_balances.iter()
+                    .find(|balance| 
+                        balance.mint == output_mint && 
+                        balance.owner.as_ref().map_or(false, |owner| *owner == wallet_key)
+                    );
+                
+                if let Some(balance) = token_account {
+                    if let Some(amount) = &balance.ui_token_amount {
+                        // Parse the actual amount received
+                        let amount_raw = amount.ui_amount.unwrap_or(0.0);
+                        info!("Actual token amount received in transaction {}: {} tokens", signature, amount_raw);
+                        return Ok(Some(amount_raw));
+                    }
+                }
+                
+                // If we couldn't find the specific token account, try an alternative approach
+                // This is a fallback that looks at all post balances for the output mint
+                for balance in post_balances {
+                    if balance.mint == output_mint {
+                        if let Some(amount) = &balance.ui_token_amount {
+                            let amount_raw = amount.ui_amount.unwrap_or(0.0);
+                            info!("Fallback: Found token amount in tx {}: {} tokens (may not be accurate)", signature, amount_raw);
+                            return Ok(Some(amount_raw));
+                        }
+                    }
+                }
+            }
+            
+            // Another approach: Parse the logs to find the token transfer amount
+            // Jupiter often emits specific logs with transfer amounts
+            if let Some(logs) = &meta.log_messages {
+                debug!("Attempting to parse logs for actual token amount in transaction {}", signature);
+                
+                // Look for token transfer logs - this pattern would need to be adjusted based on 
+                // the actual format of Jupiter's logs
+                for log in logs {
+                    // Example patterns to look for in logs (these would need to be customized)
+                    if log.contains("Transfer:") && log.contains(output_mint) {
+                        // Example of parsing a log entry like: "Transfer: 123.45 tokens"
+                        // This is highly implementation specific and would need to be adapted
+                        if let Some(amount_str) = log.split("Transfer:").nth(1).map(|s| s.trim()) {
+                            if let Ok(amount) = amount_str.parse::<f64>() {
+                                info!("Parsed from logs: Actual token amount in tx {}: {}", signature, amount);
+                                return Ok(Some(amount));
+                            }
+                        }
+                    }
+                }
+                
+                warn!("Could not parse actual token amount from transaction logs");
+            }
+        }
+        
+        // If we couldn't determine the actual amount, return None
+        warn!("Could not determine actual token amount for transaction {}", signature);
+        Ok(None)
     }
 
     // --- Price Function (Example) ---

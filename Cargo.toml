@@ -8,7 +8,7 @@ description = "Autonomous trading bot for Solana memecoins with risk analysis"
 [dependencies]
 # Async runtime
 tokio = { version = "1.32", features = ["full"] }
-tokio-retry = "0.3" # Added for RPC retries
+# Removed tokio-retry = "0.3"
 
 # Telegram bot
 teloxide = { version = "0.12", features = ["macros"] }
