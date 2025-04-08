@@ -1,7 +1,8 @@
 use anyhow::{Context, Result}; // Import the Context trait
 use solana_client::{
+    client_error::ClientErrorKind, // Import ClientErrorKind for retry logic
     rpc_client::RpcClient,
-    rpc_config::{RpcSendTransactionConfig, RpcSimulateTransactionConfig}, // Removed RpcTokenAccountsFilter
+    rpc_config::{RpcSendTransactionConfig, RpcSimulateTransactionConfig},
     rpc_response::{RpcSimulateTransactionResult, RpcTokenAccountBalance},
 };
 use solana_sdk::{
@@ -12,12 +13,13 @@ use solana_sdk::{
     transaction::VersionedTransaction, // Added VersionedTransaction
 };
 use spl_associated_token_account::get_associated_token_address;
-use spl_token::state::{Account as TokenAccount, Mint}; // Renamed Account to TokenAccount
+use spl_token::state::{Account as TokenAccount, Mint};
 use std::{str::FromStr, sync::Arc, time::Duration};
+use tokio_retry::{strategy::{ExponentialBackoff, jitter}, Retry}; // Import retry components
 use tracing::{debug, error, info, warn};
 // Removed duplicate: use anyhow::{Context, Result};
 
-use crate::error::TraderbotError; // Assuming TraderbotError exists
+use crate::error::TraderbotError;
 
 // Use Arc for shared ownership if the client needs to be shared across threads
 #[derive(Clone)] // Removed Debug derive
@@ -54,18 +56,47 @@ impl SolanaClient {
         F: FnOnce(Arc<RpcClient>) -> solana_client::client_error::Result<T> + Send + 'static, // Use the client_error::Result type directly
         T: Send + 'static,
     {
-        let client = self.rpc_client.clone();
-        let client_result = tokio::task::spawn_blocking(move || f(client))
-            .await? // Handle JoinError
-            .map_err(|e| {
-                error!("Solana RPC client error: {:?}", e);
-                // Convert ClientError to anyhow::Error using TraderbotError as intermediate
-                TraderbotError::SolanaError(format!("RPC Client Error: {}", e))
-            })?;
+        let retry_strategy = ExponentialBackoff::from_millis(100) // Start with 100ms delay
+            .map(jitter) // Add jitter to avoid thundering herd
+            .take(3); // Try up to 3 times (total 4 attempts)
 
-        // If the RPC call itself returned an error, it's already converted.
-        // If it succeeded, client_result is T.
-        Ok(client_result)
+        Retry::spawn(retry_strategy, || {
+            let client = self.rpc_client.clone();
+            let f_clone = f.clone(); // Clone the closure if it needs to be Fn
+
+            async move {
+                let result = tokio::task::spawn_blocking(move || f_clone(client))
+                    .await? // Handle JoinError
+                    .map_err(|e| {
+                        // Check if the error is retryable
+                        let is_retryable = matches!(e.kind(), ClientErrorKind::Reqwest(_) | ClientErrorKind::RpcError(_)); // Add more kinds if needed
+                        if is_retryable {
+                             warn!("Solana RPC call failed, retrying... Error: {:?}", e);
+                        } else {
+                             error!("Non-retryable Solana RPC client error: {:?}", e);
+                        }
+                        // Convert ClientError to anyhow::Error using TraderbotError as intermediate
+                        TraderbotError::SolanaError(format!("RPC Client Error: {}", e))
+                    });
+
+                // Only retry if the error was deemed retryable by map_err logic
+                match result {
+                    Ok(value) => Ok(value),
+                    Err(e) if e.to_string().contains("retrying") => Err(e), // Propagate error to trigger retry
+                    Err(e) => {
+                        // If not retryable, wrap it to stop retries
+                        Err(tokio_retry::Error::Permanent(e))
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|e| match e {
+             // Extract the permanent error if retry failed permanently
+             tokio_retry::Error::Permanent(inner_err) => inner_err,
+             // If it exhausted retries, return the last error encountered
+             tokio_retry::Error::Operation { error, .. } => error,
+        })
     }
 
 

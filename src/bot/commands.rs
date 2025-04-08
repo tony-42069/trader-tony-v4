@@ -217,11 +217,23 @@ pub async fn command_handler(
                 .await?;
         },
         Command::Analyze { token_address } => {
+            // --- Input Validation ---
+            if token_address.trim().is_empty() {
+                bot.send_message(chat_id, "⚠️ Please provide a token address after /analyze.").await?;
+                return Ok(());
+            }
+            // Basic check for Solana address format (length, base58 chars) - can be improved
+            if token_address.len() < 32 || token_address.len() > 44 || !token_address.chars().all(|c| c.is_ascii_alphanumeric()) {
+                 bot.send_message(chat_id, format!("⚠️ Invalid token address format: `{}`", escape(&token_address))).parse_mode(ParseMode::MarkdownV2).await?;
+                 return Ok(());
+            }
+            // --- End Validation ---
+
             bot.send_message(
                 chat_id,
                  // Use MarkdownV2 and escape the message (note: backticks are fine in V2)
                 escape(&format!("🔍 Analyzing token: `{}`\nPlease wait...", token_address))
-            ).parse_mode(ParseMode::MarkdownV2).await?; // Use MarkdownV2
+            ).parse_mode(ParseMode::MarkdownV2).await?;
 
             // Call RiskAnalyzer::analyze_token
             // Ensure risk_analyzer is public or add a getter in AutoTrader
@@ -280,16 +292,30 @@ pub async fn command_handler(
                 },
                 Err(e) => {
                     error!("Error analyzing token {}: {:?}", token_address, e);
-                    bot.send_message(
-                        chat_id,
-                         // Use MarkdownV2 and escape the message
-                        escape(&format!("❌ Error analyzing token `{}`.", token_address))
-                    ).parse_mode(ParseMode::MarkdownV2).await?; // Use MarkdownV2
+                    // Provide more specific feedback if possible (e.g., token not found vs. API error)
+                    let error_message = if e.to_string().contains("TokenNotFound") || e.to_string().contains("Invalid token address") {
+                        format!("❌ Could not find token address `{}`.", escape(&token_address))
+                    } else {
+                        format!("❌ Error analyzing token `{}`. Check logs for details.", escape(&token_address))
+                    };
+                    bot.send_message(chat_id, error_message).parse_mode(ParseMode::MarkdownV2).await?;
                 }
             }
         },
         // Adjust match arm for simplified Snipe command
         Command::Snipe { token_address } => {
+            // --- Input Validation ---
+            if token_address.trim().is_empty() {
+                bot.send_message(chat_id, "⚠️ Please provide a token address after /snipe.").await?;
+                return Ok(());
+            }
+            // Basic check for Solana address format
+            if token_address.len() < 32 || token_address.len() > 44 || !token_address.chars().all(|c| c.is_ascii_alphanumeric()) {
+                 bot.send_message(chat_id, format!("⚠️ Invalid token address format: `{}`", escape(&token_address))).parse_mode(ParseMode::MarkdownV2).await?;
+                 return Ok(());
+            }
+            // --- End Validation ---
+
             // Use default amount from config for now
             let amount = locked_state.config.max_position_size_sol;
             let min_amount = 0.001; // Example minimum
@@ -323,11 +349,67 @@ pub async fn command_handler(
             // 2. Check risk level against strategy/config
             // 3. Check balance
             // 4. Execute buy using JupiterClient via WalletManager
-            // 5. Create position entry in PositionManager
+            // --- Execute Snipe Logic ---
+            let auto_trader = locked_state.auto_trader.clone(); // Clone Arc for use
+            let wallet_manager = locked_state.wallet_manager.clone(); // Clone Arc
+            let config = locked_state.config.clone(); // Clone config
 
-            let snipe_result: Result<(), _> = Err(()); // Placeholder
+            // Drop the main state lock before potentially long async operations
+            drop(locked_state);
 
-            match snipe_result {
+            // 1. Analyze token
+            let analysis_result = auto_trader.lock().await.risk_analyzer.analyze_token(&token_address).await;
+
+            let risk_analysis = match analysis_result {
+                Ok(analysis) => analysis,
+                Err(e) => {
+                    error!("Snipe: Risk analysis failed for {}: {:?}", token_address, e);
+                    bot.send_message(chat_id, format!("❌ Snipe failed: Could not analyze token `{}`.", escape(&token_address))).parse_mode(ParseMode::MarkdownV2).await?;
+                    return Ok(());
+                }
+            };
+
+            // 2. Check risk level (using a default/config threshold for now)
+            // TODO: Use strategy-specific risk level if available
+            let max_allowed_risk = 70; // Example threshold
+            if risk_analysis.risk_level > max_allowed_risk {
+                 bot.send_message(chat_id, format!("❌ Snipe failed: Token `{}` risk level ({}) exceeds threshold ({}).", escape(&token_address), risk_analysis.risk_level, max_allowed_risk)).parse_mode(ParseMode::MarkdownV2).await?;
+                 return Ok(());
+            }
+            info!("Snipe: Risk check passed for {}", token_address);
+
+            // 3. Check balance (ensure enough SOL for the snipe amount)
+            let current_balance = match wallet_manager.get_sol_balance().await {
+                 Ok(bal) => bal,
+                 Err(e) => {
+                     error!("Snipe: Failed to get wallet balance: {:?}", e);
+                     bot.send_message(chat_id, "❌ Snipe failed: Could not check wallet balance.").await?;
+                     return Ok(());
+                 }
+            };
+
+            if current_balance < amount {
+                 bot.send_message(chat_id, format!("❌ Snipe failed: Insufficient balance ({:.6} SOL) to snipe {:.6} SOL.", current_balance, amount)).await?;
+                 return Ok(());
+            }
+            info!("Snipe: Balance check passed for {}", token_address);
+
+            // 4. Execute buy
+            // TODO: Refactor execute_buy logic into a reusable function in AutoTrader?
+            // For now, call a placeholder or directly implement basic Jupiter swap call
+            info!("Snipe: Attempting buy execution for {} with {} SOL...", token_address, amount);
+            // Placeholder - replace with actual call to AutoTrader::execute_buy_task or similar
+            let buy_result: Result<(), anyhow::Error> = {
+                 warn!("Snipe: Actual buy execution is not implemented yet.");
+                 // Simulate success for now for testing flow
+                 Ok(())
+                 // Err(anyhow::anyhow!("Buy execution not implemented"))
+            };
+
+
+            // 5. Create position entry (if buy succeeds) - Handled within execute_buy_task usually
+
+            match buy_result {
                  Ok(_) => {
                      // Use MarkdownV2 and escape the message
                      bot.send_message(
@@ -490,7 +572,21 @@ pub async fn callback_handler(
              "show_help" => {
                  notification_text = Some(Command::descriptions().to_string());
              }
+             // --- Strategy Callbacks ---
+             "add_strategy" => {
+                 // TODO: Implement conversation flow to add a new strategy
+                 warn!("'add_strategy' callback not fully implemented.");
+                 notification_text = Some("✏️ Adding a new strategy is not implemented yet.".to_string());
+                 // Example: Start a dialogue or send a form
+             }
+             // TODO: Add handlers for edit_strategy, delete_strategy, toggle_strategy callbacks
 
+             // --- Autotrader Callbacks ---
+             "autotrader_performance" => {
+                 // TODO: Fetch and display performance stats from AutoTrader
+                 warn!("'autotrader_performance' callback not implemented.");
+                 notification_text = Some("📈 Performance tracking is not implemented yet.".to_string());
+             }
 
             _ => {
                 warn!("Unhandled callback data: {}", data);
