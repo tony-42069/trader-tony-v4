@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use chrono::Utc;
-use reqwest::{Client, header};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use solana_sdk::{
     pubkey::Pubkey,
@@ -435,16 +434,16 @@ impl JupiterClient {
         };
 
         // Check if transaction succeeded
-        if let Some(meta) = &tx_details.meta {
+        if let Some(meta) = tx_details.transaction.meta.as_ref() {
             if let Some(err) = &meta.err {
                 warn!("Transaction {} failed with error: {:?}", signature, err);
                 return Ok(None);
             }
             
             // Look at post token balances to find the actual amount received
-            if let Some(post_balances) = &meta.post_token_balances {
+            if let Some(post_balances) = meta.post_token_balances.as_ref().and_then(|os| os.as_ref()) {
                 // Get the wallet public key
-                let wallet_key = match tx_details.transaction.message.account_keys.get(0) {
+                let wallet_key = match tx_details.transaction.transaction.message.as_ref().and_then(|msg| msg.account_keys.get(0)) {
                     Some(key) => key.to_string(),
                     None => {
                         warn!("Could not get wallet key from transaction {}", signature);
@@ -483,7 +482,7 @@ impl JupiterClient {
             
             // Another approach: Parse the logs to find the token transfer amount
             // Jupiter often emits specific logs with transfer amounts
-            if let Some(logs) = &meta.log_messages {
+            if let Some(logs) = meta.log_messages.as_ref().and_then(|os| os.as_ref()) {
                 debug!("Attempting to parse logs for actual token amount in transaction {}", signature);
                 
                 // Look for token transfer logs - this pattern would need to be adjusted based on 

@@ -9,14 +9,15 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::{Signature},
     transaction::{VersionedTransaction, TransactionError},
+    program_pack::Pack,
 };
 use solana_client::{
     nonblocking::rpc_client::RpcClient,
     client_error::ClientError,
-    rpc_config::{RpcTransactionConfig, RpcSimulateTransactionConfig},
-    rpc_response::{RpcSimulateTransactionResult, RpcTokenAccountBalance, EncodedConfirmedTransactionWithStatusMeta},
+    rpc_config::{RpcTransactionConfig, RpcSimulateTransactionConfig, RpcSendTransactionConfig},
+    rpc_response::{RpcSimulateTransactionResult, RpcTokenAccountBalance},
 };
-use solana_transaction_status::UiTransactionEncoding;
+use solana_transaction_status::{UiTransactionEncoding, EncodedConfirmedTransactionWithStatusMeta};
 use spl_token::state::{Account as TokenAccount, Mint};
 use spl_associated_token_account::get_associated_token_address;
 use tokio::time::sleep;
@@ -83,20 +84,18 @@ impl SolanaClient {
     pub fn new(rpc_url: &str) -> Result<Self> {
         let commitment_config = CommitmentConfig::confirmed();
         let rpc_client = RpcClient::new_with_commitment(rpc_url.to_string(), commitment_config);
-        match rpc_client.get_latest_blockhash() {
-            Ok(_) => info!("Successfully connected to Solana RPC: {}", rpc_url),
-            Err(e) => {
-                error!("Failed to connect to Solana RPC {}: {}", rpc_url, e);
-                return Err(TraderbotError::SolanaError(format!(
-                    "Failed to connect to RPC {}: {}",
-                    rpc_url, e
-                ))
-                .into());
-            }
-        }
         Ok(Self {
             rpc_client: Arc::new(rpc_client),
         })
+    }
+
+    pub async fn check_connection(&self) -> Result<()> {
+        self.rpc_client.get_latest_blockhash().await
+            .map(|_| info!("Successfully connected to Solana RPC"))
+            .map_err(|e| {
+                error!("Failed to connect to Solana RPC: {}", e);
+                TraderbotError::SolanaError(format!("Failed to connect to RPC: {}", e)).into()
+            })
     }
 
     // Modified run_blocking to use the custom with_retries function
@@ -124,10 +123,7 @@ impl SolanaClient {
 
 
     pub async fn get_sol_balance(&self, pubkey: &Pubkey) -> Result<f64> {
-        let pubkey_copy = *pubkey;
-        let lamports = self
-            .run_blocking(move |client| client.get_balance(&pubkey_copy))
-            .await?;
+        let lamports = self.rpc_client.get_balance(pubkey).await?;
         let sol_balance = lamports as f64 / 1_000_000_000.0;
         Ok(sol_balance)
     }
@@ -141,17 +137,13 @@ impl SolanaClient {
         Ok((token_account.amount, decimals))
     }
 
-     pub async fn get_token_balance_ui(&self, token_account_pubkey: &Pubkey) -> Result<f64> {
+    pub async fn get_token_balance_ui(&self, token_account_pubkey: &Pubkey) -> Result<f64> {
         let (amount, decimals) = self.get_token_balance(token_account_pubkey).await?;
         Ok(spl_token::amount_to_ui_amount(amount, decimals))
-     }
+    }
 
     pub async fn get_token_supply(&self, mint_pubkey: &Pubkey) -> Result<u64> {
-        let mint_pubkey_copy = *mint_pubkey;
-        let ui_amount = self
-            .run_blocking(move |client| client.get_token_supply(&mint_pubkey_copy))
-            .await
-            .context("Failed to get token supply RPC response")?;
+        let ui_amount = self.rpc_client.get_token_supply(mint_pubkey).await.context("Failed to get token supply RPC response")?;
         ui_amount.amount.parse::<u64>().context(format!(
             "Failed to parse token supply amount '{}' into u64",
             ui_amount.amount
@@ -159,19 +151,12 @@ impl SolanaClient {
     }
 
     pub async fn get_token_largest_accounts(&self, mint_pubkey: &Pubkey) -> Result<Vec<RpcTokenAccountBalance>> {
-        let mint_pubkey_copy = *mint_pubkey;
-        self.run_blocking(move |client| client.get_token_largest_accounts(&mint_pubkey_copy))
-            .await
-            .context("Failed to get token largest accounts")
+        let result = self.rpc_client.get_token_largest_accounts(mint_pubkey).await.context("Failed to get token largest accounts")?;
+        Ok(result)
     }
 
-    // Updated to use run_blocking with retries
     pub async fn get_account_data(&self, pubkey: &Pubkey) -> Result<Vec<u8>> {
-        let pubkey_copy = *pubkey;
-        let account = self
-            .run_blocking(move |client| client.get_account(&pubkey_copy))
-            .await
-            .context(format!("Failed to get account data for {}", pubkey_copy))?;
+        let account = self.rpc_client.get_account(pubkey).await.context(format!("Failed to get account data for {}", pubkey))?;
         Ok(account.data)
     }
 
@@ -214,7 +199,7 @@ impl SolanaClient {
                 let config = config.clone();
                 
                 async move {
-                    match client.send_transaction_with_config(&tx, config) {
+                    match client.send_transaction_with_config(&tx, config).await {
                         Ok(sig) => {
                             debug!("Transaction sent with signature: {}", sig);
                             Ok(sig)
@@ -263,7 +248,7 @@ impl SolanaClient {
                 let config = config.clone();
                 
                 async move {
-                    match client.simulate_transaction_with_config(&tx, config) {
+                    match client.simulate_transaction_with_config(&tx, config).await {
                         Ok(resp) => Ok(resp),
                         Err(e) => {
                             if Self::should_retry_rpc_error(&e) {
@@ -333,7 +318,7 @@ impl SolanaClient {
                     let client = self.rpc_client.clone();
                     
                     async move {
-                        match client.get_signature_statuses(&[sig]) {
+                        match client.get_signature_statuses(&[sig]).await {
                             Ok(response) => Ok(response),
                             Err(e) => {
                                 if Self::should_retry_rpc_error(&e) {
@@ -417,7 +402,7 @@ impl SolanaClient {
                 let cfg = config.clone();
                 
                 async move {
-                    match client.get_transaction_with_config(&sig, cfg) {
+                    match client.get_transaction_with_config(&sig, cfg).await {
                         Ok(tx) => Ok(tx),
                         Err(e) => {
                             if Self::should_retry_rpc_error(&e) {
@@ -436,28 +421,17 @@ impl SolanaClient {
 
     // Helper function to determine if an RPC error should be retried
     fn should_retry_rpc_error(error: &ClientError) -> bool {
-        match error.kind() {
-            ErrorKind::RpcError(err_str) => {
-                // Check for common retryable error strings
-                let err_str = err_str.to_lowercase();
-                err_str.contains("rate limit") || 
-                err_str.contains("429") ||
-                err_str.contains("timeout") ||
-                err_str.contains("503") ||
-                err_str.contains("504") ||
-                err_str.contains("server error") ||
-                err_str.contains("too many requests")
-            },
-            ErrorKind::Reqwest(_) => {
-                // Network errors are generally retryable
-                true
-            },
-            ErrorKind::TransportError(_) => {
-                // Transport errors are often temporary
-                true
-            },
-            _ => false
-        }
+        // Fallback: match error string for common retryable errors
+        let err_str = error.to_string().to_lowercase();
+        err_str.contains("rate limit")
+            || err_str.contains("429")
+            || err_str.contains("timeout")
+            || err_str.contains("503")
+            || err_str.contains("504")
+            || err_str.contains("server error")
+            || err_str.contains("too many requests")
+            || err_str.contains("network")
+            || err_str.contains("connection")
     }
 
     // Helper to determine if a transaction error should be retried

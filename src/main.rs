@@ -20,7 +20,6 @@ use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
 use crate::trading::autotrader::AutoTrader;
 use crate::api::birdeye::BirdeyeClient; // Import BirdeyeClient
-use crate::api::jupiter::JupiterClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,12 +36,13 @@ async fn main() -> Result<()> {
     let config = Arc::new(Config::load()?);
     info!("Configuration loaded successfully");
 
-    // Initialize Solana client and wrap in Arc
-    let solana_client = Arc::new(SolanaClient::new(&config.solana_rpc_url)?);
+    // Initialize Solana client (do not wrap in Arc here)
+    let solana_client = SolanaClient::new(&config.solana_rpc_url)?;
+    solana_client.check_connection().await?;
     info!("Solana client initialized successfully");
 
     // Initialize wallet manager (already returns Arc<Self>)
-    let wallet_manager = WalletManager::new(&config.solana_private_key, solana_client.clone(), config.demo_mode)?;
+    let wallet_manager = WalletManager::new(&config.solana_private_key, Arc::new(solana_client), config.demo_mode)?;
     info!("Wallet initialized with address: {}", wallet_manager.get_public_key());
 
     // Initialize Birdeye client
@@ -53,8 +53,8 @@ async fn main() -> Result<()> {
 
     // Initialize AutoTrader
     let auto_trader = AutoTrader::new(
-        Arc::new(wallet_manager),
-        Arc::new(solana_client),
+        wallet_manager.clone(),
+        wallet_manager.solana_client().clone(),
         config.clone(), // Already Arc<Config>
     )?; // Handle potential error from AutoTrader::new
     info!("AutoTrader initialized");

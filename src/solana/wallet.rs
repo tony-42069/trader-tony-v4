@@ -150,8 +150,8 @@ impl WalletManager {
     }
 
     // Helper to sign a legacy transaction (less common now)
-    pub fn sign_legacy_transaction(&self, mut transaction: Transaction) -> Result<Transaction> {
-         let recent_blockhash = self.solana_client.get_rpc().get_latest_blockhash()?;
+    pub async fn sign_legacy_transaction(&self, mut transaction: Transaction) -> Result<Transaction> {
+         let recent_blockhash = self.solana_client.get_rpc().get_latest_blockhash().await?;
          transaction
             .try_sign(&[&*self.keypair], recent_blockhash)
              .map_err(|e| {

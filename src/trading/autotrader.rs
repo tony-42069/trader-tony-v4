@@ -18,7 +18,7 @@ use crate::solana::wallet::WalletManager;
 use crate::config::Config;
 use crate::trading::position::{PositionManager, PositionStatus}; // Assuming these exist
 use crate::trading::risk::{RiskAnalysis, RiskAnalyzer}; // Assuming these exist
-use crate::trading::strategy::{Strategy, self as strategy_persistence}; // Using persistence module
+use crate::trading::strategy::Strategy;
 use crate::models::token::TokenMetadata;
 use solana_sdk::signature::Signature;
 use solana_sdk::pubkey::Pubkey;

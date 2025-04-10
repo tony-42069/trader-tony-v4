@@ -37,10 +37,10 @@ pub enum Command {
     Positions,
     
     #[command(description = "Analyze a token's risk profile")]
-    Analyze { token_address: String },
+    Analyze(String),
     
     #[command(description = "Buy a token immediately")]
-    Snipe { token_address: String, amount_sol: f64 },
+    Snipe(String, f64),
 }
 
 // --- Authorization Check ---
@@ -89,7 +89,7 @@ pub async fn command_handler(
                 *Wallet:* `{}`\n\n\
                 Use /help to see commands or the buttons below.",
                 if locked_state.config.demo_mode { "🧪 DEMO" } else { "🔴 REAL" },
-                locked_state.wallet_manager.get_public_key(),
+                locked_state.wallet_manager.as_ref().expect("WalletManager not initialized").get_public_key(),
             );
 
             // Use MarkdownV2 and escape the message
@@ -103,7 +103,7 @@ pub async fn command_handler(
         },
         Command::Balance => {
              // Re-lock state briefly if needed, or pass cloned client/wallet
-            let balance_result = locked_state.wallet_manager.get_sol_balance().await;
+            let balance_result = locked_state.wallet_manager.as_ref().expect("WalletManager not initialized").get_sol_balance().await;
 
             match balance_result {
                 Ok(balance) => {
@@ -111,7 +111,7 @@ pub async fn command_handler(
                         "💰 *Wallet Balance*\n\n\
                         *Address:* `{}`\n\
                         *Balance:* {:.6} SOL", // Format SOL balance
-                        locked_state.wallet_manager.get_public_key(),
+                        locked_state.wallet_manager.as_ref().expect("WalletManager not initialized").get_public_key(),
                         balance
                     );
                      // Use MarkdownV2 and escape the message
@@ -284,7 +284,7 @@ pub async fn command_handler(
                 .reply_markup(keyboards::positions_menu()) // Use keyboard
                 .await?;
         },
-        Command::Analyze { token_address } => {
+        Command::Analyze(token_address) => {
             // --- Input Validation ---
             if token_address.trim().is_empty() {
                 bot.send_message(chat_id, "⚠️ Please provide a token address after /analyze.").await?;
@@ -371,7 +371,7 @@ pub async fn command_handler(
             }
         },
         // Adjust match arm for simplified Snipe command
-        Command::Snipe { token_address, amount_sol } => {
+        Command::Snipe(token_address, amount_sol) => {
             // --- Input Validation ---
             if token_address.trim().is_empty() {
                 bot.send_message(chat_id, "⚠️ Please provide a token address after /snipe.").await?;
@@ -385,7 +385,11 @@ pub async fn command_handler(
             // --- End Validation ---
 
             // Use default amount from config for now
-            let amount = amount_sol.unwrap_or(locked_state.config.max_position_size_sol);
+            let amount = if amount_sol == 0.0 {
+                locked_state.config.max_position_size_sol
+            } else {
+                amount_sol
+            };
             let min_amount = 0.001; // Example minimum
             // Max amount check might need refinement based on available budget, not just total
             let max_amount = locked_state.config.total_budget_sol;
@@ -447,7 +451,7 @@ pub async fn command_handler(
             info!("Snipe: Risk check passed for {}", token_address);
 
             // 3. Check balance (ensure enough SOL for the snipe amount)
-            let current_balance = match wallet_manager.get_sol_balance().await {
+            let current_balance = match wallet_manager.as_ref().expect("WalletManager not initialized").get_sol_balance().await {
                  Ok(bal) => bal,
                  Err(e) => {
                      error!("Snipe: Failed to get wallet balance: {:?}", e);
@@ -606,7 +610,7 @@ pub async fn callback_handler(
                  let welcome_message = format!(
                     "🤖 *Welcome back!*\n\n*Mode:* {}\n*Wallet:* `{}`",
                     if locked_state.config.demo_mode { "🧪 DEMO" } else { "🔴 REAL" },
-                    locked_state.wallet_manager.get_public_key(),
+                    locked_state.wallet_manager.as_ref().expect("WalletManager not initialized").get_public_key(),
                  );
                   if let Some(msg) = q.message {
                      bot.edit_message_text(msg.chat.id, msg.id, escape(&welcome_message))
@@ -1168,7 +1172,7 @@ pub async fn callback_handler(
              // --- Utility Callbacks ---
              "show_balance" => {
                  // Call the logic similar to /balance command
-                 let balance_result = locked_state.wallet_manager.get_sol_balance().await;
+                 let balance_result = locked_state.wallet_manager.as_ref().expect("WalletManager not initialized").get_sol_balance().await;
                  let balance_message = match balance_result {
                      Ok(bal) => format!("💰 *Balance:* {:.6} SOL", bal),
                      Err(_) => "❌ Failed to retrieve balance.".to_string(),
@@ -1338,7 +1342,7 @@ pub async fn callback_handler(
                              Current wallet balance: {:.6} SOL",
                              token_address,
                              current_amount,
-                             locked_state.wallet_manager.get_sol_balance().await.unwrap_or(0.0)
+                             locked_state.wallet_manager.as_ref().expect("WalletManager not initialized").get_sol_balance().await.unwrap_or(0.0)
                          );
                          
                          // Create a custom keyboard for the confirmation with amount options
