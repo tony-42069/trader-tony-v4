@@ -471,7 +471,7 @@ pub async fn command_handler(
             info!("Snipe: Risk check passed for {}", token_address);
 
             // 3. Check balance (ensure enough SOL for the snipe amount)
-            let current_balance = match wallet_manager.as_ref().expect("WalletManager not initialized").get_sol_balance().await {
+            let current_balance = match wallet_manager.get_sol_balance().await {
                  Ok(bal) => bal,
                  Err(e) => {
                      error!("Snipe: Failed to get wallet balance: {:?}", e);
@@ -1459,50 +1459,50 @@ pub async fn callback_handler(
                                      )).parse_mode(ParseMode::MarkdownV2).await?;
                                  } else {
                                      // Check balance
-                                     match wallet_manager.get_sol_balance().await {
-                                         Ok(current_balance) => {
-                                             if current_balance < amount {
-                                                 bot.send_message(chat, format!(
-                                                     "❌ Snipe failed: Insufficient balance ({:.6} SOL) to snipe {:.6} SOL.",
-                                                     current_balance, amount
-                                                 )).await?;
-                                             } else {
-                                                 // Execute buy
-                                                 let buy_result = auto_trader.lock().await.execute_manual_buy(
-                                                     &token_address,
-                                                     amount,
-                                                 ).await;
-                                                 
-                                                 match buy_result {
-                                                     Ok(swap_result) => {
-                                                         bot.send_message(
-                                                             chat,
-                                                             escape(&format!(
-                                                                 "✅ Successfully sniped `{}` with {:.6} SOL!\nSignature: `{}`",
-                                                                 token_address, amount, swap_result.transaction_signature
-                                                             ))
-                                                         ).parse_mode(ParseMode::MarkdownV2)
-                                                          .reply_markup(InlineKeyboardMarkup::new(vec![
-                                                              vec![InlineKeyboardButton::callback("📊 View Positions", "positions_menu")],
-                                                              vec![InlineKeyboardButton::callback("🔙 Main Menu", "main_menu")],
-                                                          ]))
-                                                         .await?;
-                                                     },
-                                                     Err(e) => {
-                                                         error!("Snipe execution failed for token {}: {:?}", token_address, e);
-                                                         bot.send_message(
-                                                             chat,
-                                                             escape(&format!("❌ Snipe failed for token `{}`. Reason: {}", token_address, e))
-                                                         ).parse_mode(ParseMode::MarkdownV2).await?;
-                                                     }
-                                                 }
-                                             }
-                                         },
-                                         Err(e) => {
-                                             error!("Snipe: Failed to get wallet balance: {:?}", e);
-                                             bot.send_message(chat, "❌ Snipe failed: Could not check wallet balance.").await?;
-                                         }
-                                     }
+                 match wallet_manager.as_ref().expect("WalletManager not initialized").get_sol_balance().await {
+                     Ok(current_balance) => {
+                         if current_balance < amount {
+                             bot.send_message(chat, format!(
+                                 "❌ Snipe failed: Insufficient balance ({:.6} SOL) to snipe {:.6} SOL.",
+                                 current_balance, amount
+                             )).await?;
+                         } else {
+                             // Execute buy
+                             let buy_result = auto_trader.lock().await.execute_manual_buy(
+                                 &token_address,
+                                 amount,
+                             ).await;
+                             
+                             match buy_result {
+                                 Ok(swap_result) => {
+                                     bot.send_message(
+                                         chat,
+                                         escape(&format!(
+                                             "✅ Successfully sniped `{}` with {:.6} SOL!\nSignature: `{}`",
+                                             token_address, amount, swap_result.transaction_signature
+                                         ))
+                                     ).parse_mode(ParseMode::MarkdownV2)
+                                      .reply_markup(InlineKeyboardMarkup::new(vec![
+                                          vec![InlineKeyboardButton::callback("📊 View Positions", "positions_menu")],
+                                          vec![InlineKeyboardButton::callback("🔙 Main Menu", "main_menu")],
+                                      ]))
+                                     .await?;
+                                 },
+                                 Err(e) => {
+                                     error!("Snipe execution failed for token {}: {:?}", token_address, e);
+                                     bot.send_message(
+                                         chat,
+                                         escape(&format!("❌ Snipe failed for token `{}`. Reason: {}", token_address, e))
+                                     ).parse_mode(ParseMode::MarkdownV2).await?;
+                                 }
+                             }
+                         }
+                     },
+                     Err(e) => {
+                         error!("Snipe: Failed to get wallet balance: {:?}", e);
+                         bot.send_message(chat, "❌ Snipe failed: Could not check wallet balance.").await?;
+                     }
+                 }
                                  }
                              },
                              Err(e) => {

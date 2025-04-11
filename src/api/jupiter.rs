@@ -441,17 +441,19 @@ impl JupiterClient {
             }
             
             // Look at post token balances to find the actual amount received
-            if let Some(post_balances) = meta.post_token_balances.as_ref().and_then(|os| os.as_ref()) {
+            if let Some(post_balances_serializer) = meta.post_token_balances.as_ref() {
                 // Get the wallet public key
                 // --- SDK v1.17+ compatible: extract wallet key from VersionedTransaction ---
-                // Try to get the base64-encoded transaction string
-                let encoded_tx_str = if let Some(encoded_tx) = tx_details.transaction.transaction.transaction.as_str() {
-                    encoded_tx
-                } else {
-                    warn!("Transaction data is not a string for tx {}", signature);
-                    return Ok(None);
+                // Get the base64 encoded string based on the enum variant
+                let encoded_tx_str = match &tx_details.transaction.transaction {
+                    solana_sdk::transaction::EncodedTransactionEnum::Legacy(s)
+                    | solana_sdk::transaction::EncodedTransactionEnum::Versioned(s) => s,
+                    _ => {
+                        warn!("Transaction data is not in expected Legacy/Versioned string format for tx {}", signature);
+                        return Ok(None);
+                    }
                 };
-                let decoded_tx_bytes = base64::decode(encoded_tx_str)
+                let decoded_tx_bytes = STANDARD.decode(encoded_tx_str)
                     .context(format!("Failed to decode base64 tx {}", signature))?;
                 let versioned_tx: solana_sdk::transaction::VersionedTransaction = bincode::deserialize(&decoded_tx_bytes)
                     .context(format!("Failed to deserialize VersionedTransaction for tx {}", signature))?;
@@ -462,14 +464,14 @@ impl JupiterClient {
                         return Ok(None);
                     }
                 };
-                
-                // Find the token account for the output token owned by the wallet
-                let token_account = post_balances.iter()
+
+                // Use post_balances_serializer directly as a Vec
+                let token_account = post_balances_serializer.iter()
                     .find(|balance| 
                         balance.mint == output_mint && 
                         balance.owner.as_ref().map_or(false, |owner| *owner == wallet_key)
                     );
-                
+
                 if let Some(balance) = token_account {
                     if let Some(amount) = &balance.ui_token_amount {
                         // Parse the actual amount received
@@ -478,10 +480,10 @@ impl JupiterClient {
                         return Ok(Some(amount_raw));
                     }
                 }
-                
+
                 // If we couldn't find the specific token account, try an alternative approach
                 // This is a fallback that looks at all post balances for the output mint
-                for balance in post_balances {
+                for balance in post_balances_serializer {
                     if balance.mint == output_mint {
                         if let Some(amount) = &balance.ui_token_amount {
                             let amount_raw = amount.ui_amount.unwrap_or(0.0);
@@ -494,12 +496,11 @@ impl JupiterClient {
             
             // Another approach: Parse the logs to find the token transfer amount
             // Jupiter often emits specific logs with transfer amounts
-            if let Some(logs) = meta.log_messages.as_ref().and_then(|os| os.as_ref()) {
+            if let Some(logs_serializer) = meta.log_messages.as_ref() {
                 debug!("Attempting to parse logs for actual token amount in transaction {}", signature);
-                
-                // Look for token transfer logs - this pattern would need to be adjusted based on 
-                // the actual format of Jupiter's logs
-                for log in logs {
+
+                // Use logs_serializer directly as a Vec
+                for log in logs_serializer {
                     // Example patterns to look for in logs (these would need to be customized)
                     if log.contains("Transfer:") && log.contains(output_mint) {
                         // Example of parsing a log entry like: "Transfer: 123.45 tokens"
@@ -512,7 +513,7 @@ impl JupiterClient {
                         }
                     }
                 }
-                
+
                 warn!("Could not parse actual token amount from transaction logs");
             }
         }
