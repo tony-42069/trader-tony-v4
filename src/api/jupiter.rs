@@ -3,14 +3,12 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use solana_sdk::{
-    pubkey::Pubkey,
     signature::Signature,
     transaction::VersionedTransaction,
 };
 use solana_transaction_status::{
     EncodedTransaction,
     option_serializer::OptionSerializer,
-    UiTransactionTokenBalance,
 };
 use std::{
     sync::Arc,
@@ -327,77 +325,73 @@ impl JupiterClient {
                 return Ok(None);
             }
         };
-
+    
         if let Some(meta) = tx_details.transaction.meta.as_ref() {
             if let Some(err) = &meta.err {
                 warn!("Transaction {} failed with error: {:?}", signature, err);
                 return Ok(None);
             }
-
-            // --- FIX for OptionSerializer post_token_balances ---
+    
+            // Simply using the transaction signature as identifier
+            // We don't need to extract complex data from the transaction itself
+            info!("Processing transaction {}", signature);
+    
+            // Directly check post_token_balances for the output token
             if let OptionSerializer::Some(balances) = &meta.post_token_balances {
-                // Get the wallet public key
-                // --- FIX for EncodedTransaction ---
-                let encoded_tx_str = match &tx_details.transaction.transaction {
-                    EncodedTransaction::Legacy(s) |
-                    EncodedTransaction::Versioned(s) => s,
-                    _ => {
-                        warn!("Transaction data is not in expected Legacy/Versioned string format for tx {}", signature);
-                        return Ok(None);
-                    }
-                };
-                let decoded_tx_bytes = STANDARD.decode(encoded_tx_str).context(format!("Failed to decode base64 tx {}", signature))?;
-                let versioned_tx: VersionedTransaction = bincode::deserialize(&decoded_tx_bytes).context(format!("Failed to deserialize VersionedTransaction for tx {}", signature))?;
-                let wallet_key = match versioned_tx.message.static_account_keys().get(0) {
-                    Some(key) => key.to_string(),
-                    None => { warn!("Could not get wallet key (static_account_keys[0]) from transaction {}", signature); return Ok(None); }
-                };
-                // --- End Fixes ---
-
-                // Find the token account for the output token owned by the wallet
-                let token_account = balances.iter().find(|balance|
-                    balance.mint == output_mint &&
-                    balance.owner.as_ref().map_or(false, |owner| *owner == wallet_key)
-                );
-
-                if let Some(balance) = token_account {
-                    if let Some(amount) = &balance.ui_token_amount {
-                        let amount_raw = amount.ui_amount.unwrap_or(0.0);
-                        info!("Actual token amount received in transaction {}: {} tokens", signature, amount_raw);
-                        return Ok(Some(amount_raw));
+                for balance in balances {
+                    // Check if this is the output token
+                    if balance.mint == output_mint {
+                        // Get the UI amount
+                        if let Some(ui_amount) = balance.ui_token_amount.ui_amount {
+                            info!("Found token amount: {} for mint {}", ui_amount, output_mint);
+                            return Ok(Some(ui_amount));
+                        }
                     }
                 }
-                warn!("Could not find specific output token balance for wallet in tx {}", signature);
+                warn!("Could not find output token balance for mint {} in tx {}", output_mint, signature);
             } else {
-                 warn!("Post token balances OptionSerializer was None for tx {}", signature);
+                warn!("Post token balances not available for tx {}", signature);
             }
-
-            // --- FIX for OptionSerializer log_messages ---
+    
+            // Try to extract from logs as a fallback
             if let OptionSerializer::Some(logs) = &meta.log_messages {
-                debug!("Attempting to parse logs for actual token amount in transaction {}", signature);
-                for log in logs.iter() {
+                for log in logs {
                     if log.contains("Transfer:") && log.contains(output_mint) {
                         if let Some(amount_str) = log.split("Transfer:").nth(1).map(|s| s.trim()) {
                             if let Ok(amount) = amount_str.parse::<f64>() {
-                                info!("Parsed from logs: Actual token amount in tx {}: {}", signature, amount);
-                                // Optionally return here if primary method failed
+                                info!("Parsed from logs: token amount {} for mint {}", amount, output_mint);
+                                return Ok(Some(amount));
                             }
                         }
                     }
                 }
-                warn!("Could not parse actual token amount from transaction logs");
-            } else {
-                 warn!("Log messages OptionSerializer was None for tx {}", signature);
             }
-        } else {
-             warn!("Transaction meta was None for tx {}", signature);
         }
-
-        warn!("Could not determine actual token amount for transaction {}", signature);
+    
+        warn!("Could not determine token amount for tx {}", signature);
         Ok(None)
     }
 
-     pub async fn get_price(
+            // Try to extract from logs as a fallback
+            if let OptionSerializer::Some(logs) = &meta.log_messages {
+                for log in logs {
+                    if log.contains("Transfer:") && log.contains(output_mint) {
+                        if let Some(amount_str) = log.split("Transfer:").nth(1).map(|s| s.trim()) {
+                            if let Ok(amount) = amount_str.parse::<f64>() {
+                                info!("Parsed from logs: token amount {} for mint {}", amount, output_mint);
+                                return Ok(Some(amount));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        warn!("Could not determine token amount for tx {}", signature);
+        Ok(None)
+    }
+
+    pub async fn get_price(
         &self,
         input_mint: &str,
         output_mint: &str,
@@ -415,50 +409,3 @@ impl JupiterClient {
         Ok(price)
     }
 }
-
-</final_file_content>
-
-IMPORTANT: For any future changes to this file, use the final_file_content shown above as your reference. This content reflects the current state of the file, including any auto-formatting (e.g., if you used single quotes but the formatter converted them to double quotes). Always base your SEARCH/REPLACE operations on this final version to ensure accuracy.
-
-<environment_details>
-# VSCode Visible Files
-src/api/jupiter.rs
-
-# VSCode Open Tabs
-src/config.rs
-src/api/mod.rs
-TODO.md
-src/trading/strategy.rs
-src/trading/autotrader.rs
-src/bot/commands.rs
-src/api/jupiter.rs
-src/main.rs
-src/trading/risk.rs
-src/solana/client.rs
-src/solana/wallet.rs
-.env
-src/trading/position.rs
-Cargo.toml
-src/api/birdeye.rs
-src/api/helius.rs
-.gitignore
-src/error.rs
-src/bot/mod.rs
-src/models/mod.rs
-src/models/token.rs
-src/models/user.rs
-src/solana/mod.rs
-src/trading/mod.rs
-README.md
-deployment.md
-strategy.md
-api.md
-.env.example
-src/bot/keyboards.rs
-
-# Current Time
-4/10/2025, 9:10:13 PM (America/New_York, UTC-4:00)
-
-# Current Mode
-ACT MODE
-</environment_details>
