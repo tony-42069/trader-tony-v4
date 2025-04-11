@@ -126,7 +126,6 @@ pub struct SwapResult {
     pub transaction_signature: String,
 }
 
-
 impl JupiterClient {
     pub fn new(api_key: Option<String>) -> Self {
         Self {
@@ -183,7 +182,7 @@ impl JupiterClient {
         Ok(quote)
     }
 
-     pub async fn get_swap_transaction(
+    pub async fn get_swap_transaction(
         &self,
         quote: &QuoteResponse,
         user_public_key: &str,
@@ -236,23 +235,38 @@ impl JupiterClient {
         let lamports_in = (amount_sol * 1_000_000_000.0) as u64;
         if lamports_in == 0 { return Err(anyhow!("Input SOL amount is too small or zero")); }
 
-        let quote = self.get_quote(SOL_MINT, token_mint, lamports_in, slippage_bps).await.context("Failed to get quote for SOL to token swap")?;
-        let estimated_out_lamports = quote.out_amount.parse::<u64>().context("Failed to parse quote out_amount")?;
+        let quote = self.get_quote(SOL_MINT, token_mint, lamports_in, slippage_bps).await
+            .context("Failed to get quote for SOL to token swap")?;
+        let estimated_out_lamports = quote.out_amount.parse::<u64>()
+            .context("Failed to parse quote out_amount")?;
         let estimated_out_ui = estimated_out_lamports as f64 / 10f64.powi(token_decimals as i32);
         let price_impact = quote.price_impact_pct.parse::<f64>().unwrap_or(0.0);
-        info!("Quote received: {:.6} SOL -> {:.6} {} (Price Impact: {:.4}%)", amount_sol, estimated_out_ui, token_mint, price_impact);
+        info!("Quote received: {:.6} SOL -> {:.6} {} (Price Impact: {:.4}%)", 
+              amount_sol, estimated_out_ui, token_mint, price_impact);
 
         let user_public_key = wallet_manager.get_public_key().to_string();
-        let swap_response = self.get_swap_transaction(&quote, &user_public_key, priority_fee_micro_lamports).await.context("Failed to get swap transaction")?;
+        let swap_response = self.get_swap_transaction(&quote, &user_public_key, priority_fee_micro_lamports).await
+            .context("Failed to get swap transaction")?;
 
-        let transaction_bytes = STANDARD.decode(&swap_response.swap_transaction).context("Failed to decode swap transaction")?;
-        let versioned_tx: VersionedTransaction = bincode::deserialize(&transaction_bytes).context("Failed to deserialize VersionedTransaction")?;
+        let transaction_bytes = STANDARD.decode(&swap_response.swap_transaction)
+            .context("Failed to decode swap transaction")?;
+        let versioned_tx: VersionedTransaction = bincode::deserialize(&transaction_bytes)
+            .context("Failed to deserialize VersionedTransaction")?;
 
         info!("Sending swap transaction...");
-        let signature = wallet_manager.sign_and_send_versioned_transaction(versioned_tx, swap_response.last_valid_block_height).await.context("Failed to sign and send swap transaction")?;
+        let signature = wallet_manager.sign_and_send_versioned_transaction(
+            versioned_tx, 
+            swap_response.last_valid_block_height
+        ).await.context("Failed to sign and send swap transaction")?;
         info!("Swap transaction sent: {}", signature);
 
-        let actual_out_amount_ui = self.get_actual_amount_from_transaction(&signature.to_string(), quote.input_mint.as_str(), quote.output_mint.as_str(), token_decimals, &wallet_manager.solana_client()).await?;
+        let actual_out_amount_ui = self.get_actual_amount_from_transaction(
+            &signature.to_string(), 
+            quote.input_mint.as_str(), 
+            quote.output_mint.as_str(), 
+            token_decimals, 
+            &wallet_manager.solana_client()
+        ).await?;
 
         Ok(SwapResult {
             input_mint: SOL_MINT.to_string(),
@@ -265,7 +279,7 @@ impl JupiterClient {
         })
     }
 
-     pub async fn swap_token_to_sol(
+    pub async fn swap_token_to_sol(
         &self,
         token_mint: &str,
         token_decimals: u8,
@@ -276,25 +290,40 @@ impl JupiterClient {
     ) -> Result<SwapResult> {
         info!("Initiating swap: {:.6} Token {} to SOL", token_amount_ui, token_mint);
         let token_amount_lamports = (token_amount_ui * 10f64.powi(token_decimals as i32)) as u64;
-         if token_amount_lamports == 0 { return Err(anyhow!("Input token amount is too small or zero")); }
+        if token_amount_lamports == 0 { return Err(anyhow!("Input token amount is too small or zero")); }
 
-        let quote = self.get_quote(token_mint, SOL_MINT, token_amount_lamports, slippage_bps).await.context("Failed to get quote for token to SOL swap")?;
-        let estimated_out_lamports = quote.out_amount.parse::<u64>().context("Failed to parse quote out_amount")?;
+        let quote = self.get_quote(token_mint, SOL_MINT, token_amount_lamports, slippage_bps).await
+            .context("Failed to get quote for token to SOL swap")?;
+        let estimated_out_lamports = quote.out_amount.parse::<u64>()
+            .context("Failed to parse quote out_amount")?;
         let estimated_out_ui = estimated_out_lamports as f64 / 1_000_000_000.0;
         let price_impact = quote.price_impact_pct.parse::<f64>().unwrap_or(0.0);
-         info!("Quote received: {:.6} {} -> {:.6} SOL (Price Impact: {:.4}%)", token_amount_ui, token_mint, estimated_out_ui, price_impact);
+        info!("Quote received: {:.6} {} -> {:.6} SOL (Price Impact: {:.4}%)", 
+              token_amount_ui, token_mint, estimated_out_ui, price_impact);
 
         let user_public_key = wallet_manager.get_public_key().to_string();
-        let swap_response = self.get_swap_transaction(&quote, &user_public_key, priority_fee_micro_lamports).await.context("Failed to get swap transaction")?;
+        let swap_response = self.get_swap_transaction(&quote, &user_public_key, priority_fee_micro_lamports).await
+            .context("Failed to get swap transaction")?;
 
-        let transaction_bytes = STANDARD.decode(&swap_response.swap_transaction).context("Failed to decode swap transaction")?;
-        let versioned_tx: VersionedTransaction = bincode::deserialize(&transaction_bytes).context("Failed to deserialize VersionedTransaction")?;
+        let transaction_bytes = STANDARD.decode(&swap_response.swap_transaction)
+            .context("Failed to decode swap transaction")?;
+        let versioned_tx: VersionedTransaction = bincode::deserialize(&transaction_bytes)
+            .context("Failed to deserialize VersionedTransaction")?;
 
         info!("Sending swap transaction...");
-        let signature = wallet_manager.sign_and_send_versioned_transaction(versioned_tx, swap_response.last_valid_block_height).await.context("Failed to sign and send swap transaction")?;
+        let signature = wallet_manager.sign_and_send_versioned_transaction(
+            versioned_tx, 
+            swap_response.last_valid_block_height
+        ).await.context("Failed to sign and send swap transaction")?;
         info!("Swap transaction sent: {}", signature);
 
-        let actual_out_amount_ui = self.get_actual_amount_from_transaction(&signature.to_string(), quote.input_mint.as_str(), quote.output_mint.as_str(), 9, &wallet_manager.solana_client()).await?;
+        let actual_out_amount_ui = self.get_actual_amount_from_transaction(
+            &signature.to_string(), 
+            quote.input_mint.as_str(), 
+            quote.output_mint.as_str(), 
+            9, 
+            &wallet_manager.solana_client()
+        ).await?;
 
         Ok(SwapResult {
             input_mint: token_mint.to_string(),
@@ -315,6 +344,7 @@ impl JupiterClient {
         _output_decimals: u8,
         solana_client: &SolanaClient,
     ) -> Result<Option<f64>> {
+        // Get transaction details
         let tx_details = match solana_client.get_transaction(
             &Signature::from_str(signature)?,
             solana_sdk::commitment_config::CommitmentConfig::confirmed(),
@@ -325,69 +355,55 @@ impl JupiterClient {
                 return Ok(None);
             }
         };
-    
+
+        // Check if transaction succeeded
         if let Some(meta) = tx_details.transaction.meta.as_ref() {
             if let Some(err) = &meta.err {
                 warn!("Transaction {} failed with error: {:?}", signature, err);
                 return Ok(None);
             }
-    
-            // Simply using the transaction signature as identifier
-            // We don't need to extract complex data from the transaction itself
-            info!("Processing transaction {}", signature);
-    
-            // Directly check post_token_balances for the output token
-            if let OptionSerializer::Some(balances) = &meta.post_token_balances {
-                for balance in balances {
-                    // Check if this is the output token
-                    if balance.mint == output_mint {
-                        // Get the UI amount
-                        if let Some(ui_amount) = balance.ui_token_amount.ui_amount {
-                            info!("Found token amount: {} for mint {}", ui_amount, output_mint);
-                            return Ok(Some(ui_amount));
-                        }
-                    }
-                }
-                warn!("Could not find output token balance for mint {} in tx {}", output_mint, signature);
-            } else {
-                warn!("Post token balances not available for tx {}", signature);
-            }
-    
-            // Try to extract from logs as a fallback
-            if let OptionSerializer::Some(logs) = &meta.log_messages {
-                for log in logs {
-                    if log.contains("Transfer:") && log.contains(output_mint) {
-                        if let Some(amount_str) = log.split("Transfer:").nth(1).map(|s| s.trim()) {
-                            if let Ok(amount) = amount_str.parse::<f64>() {
-                                info!("Parsed from logs: token amount {} for mint {}", amount, output_mint);
-                                return Ok(Some(amount));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    
-        warn!("Could not determine token amount for tx {}", signature);
-        Ok(None)
-    }
 
-            // Try to extract from logs as a fallback
-            if let OptionSerializer::Some(logs) = &meta.log_messages {
-                for log in logs {
-                    if log.contains("Transfer:") && log.contains(output_mint) {
-                        if let Some(amount_str) = log.split("Transfer:").nth(1).map(|s| s.trim()) {
-                            if let Ok(amount) = amount_str.parse::<f64>() {
-                                info!("Parsed from logs: token amount {} for mint {}", amount, output_mint);
-                                return Ok(Some(amount));
+            // Try to extract token balance from post_token_balances
+            match &meta.post_token_balances {
+                OptionSerializer::Some(balances) => {
+                    for balance in balances {
+                        if balance.mint == output_mint {
+                            // Found our token
+                            if let Some(ui_amount) = balance.ui_token_amount.ui_amount {
+                                info!("Found token amount in tx {}: {}", signature, ui_amount);
+                                return Ok(Some(ui_amount));
                             }
                         }
                     }
+                },
+                _ => {
+                    warn!("No post token balances found in transaction {}", signature);
+                }
+            }
+
+            // Fallback: try to find amount in logs
+            match &meta.log_messages {
+                OptionSerializer::Some(logs) => {
+                    for log in logs {
+                        if log.contains("Transfer:") && log.contains(output_mint) {
+                            debug!("Found transfer log: {}", log);
+                            // Try to extract amount - this is a simplistic approach
+                            if let Some(amount_str) = log.split("Transfer:").nth(1) {
+                                if let Ok(amount) = amount_str.trim().parse::<f64>() {
+                                    info!("Parsed amount from logs: {}", amount);
+                                    return Ok(Some(amount));
+                                }
+                            }
+                        }
+                    }
+                },
+                _ => {
+                    warn!("No logs found in transaction {}", signature);
                 }
             }
         }
 
-        warn!("Could not determine token amount for tx {}", signature);
+        warn!("Could not determine exact amount for transaction {}", signature);
         Ok(None)
     }
 
