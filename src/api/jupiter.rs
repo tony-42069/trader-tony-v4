@@ -443,10 +443,22 @@ impl JupiterClient {
             // Look at post token balances to find the actual amount received
             if let Some(post_balances) = meta.post_token_balances.as_ref().and_then(|os| os.as_ref()) {
                 // Get the wallet public key
-                let wallet_key = match tx_details.transaction.transaction.message.as_ref().and_then(|msg| msg.account_keys.get(0)) {
+                // --- SDK v1.17+ compatible: extract wallet key from VersionedTransaction ---
+                // Try to get the base64-encoded transaction string
+                let encoded_tx_str = if let Some(encoded_tx) = tx_details.transaction.transaction.transaction.as_str() {
+                    encoded_tx
+                } else {
+                    warn!("Transaction data is not a string for tx {}", signature);
+                    return Ok(None);
+                };
+                let decoded_tx_bytes = base64::decode(encoded_tx_str)
+                    .context(format!("Failed to decode base64 tx {}", signature))?;
+                let versioned_tx: solana_sdk::transaction::VersionedTransaction = bincode::deserialize(&decoded_tx_bytes)
+                    .context(format!("Failed to deserialize VersionedTransaction for tx {}", signature))?;
+                let wallet_key = match versioned_tx.message.static_account_keys().get(0) {
                     Some(key) => key.to_string(),
                     None => {
-                        warn!("Could not get wallet key from transaction {}", signature);
+                        warn!("Could not get wallet key (static_account_keys[0]) from transaction {}", signature);
                         return Ok(None);
                     }
                 };

@@ -10,37 +10,57 @@ use crate::bot::keyboards; // Assuming keyboards module exists for callbacks
 use crate::bot::BotState;
 use crate::trading::position::{Position, PositionStatus}; // Add Position and PositionStatus imports
 use crate::config::Config;
+
+// Manual help text for bot commands (replaces Command::descriptions())
+const HELP_TEXT: &str = "\
+/start - Initialize the bot and show the main menu.
+/help - Display available commands.
+/balance - Show the current SOL balance of the bot's wallet.
+/autotrader - View AutoTrader status and start/stop controls.
+/strategy - View, add, or manage trading strategies.
+/positions - View currently open trading positions.
+/analyze <token_address> - Perform risk analysis on a specific token.
+/snipe <token_address> [amount_sol] - Manually buy a token (uses default strategy settings if not specified). Use with caution.";
 use teloxide::utils::markdown::escape; // Use teloxide's built-in escape function
 
-#[derive(BotCommands, Clone, Debug)]
-#[command(
-    rename_rule = "lowercase",
-    description = "Trader Tony V4 Commands:"
-)]
+#[derive(Clone, Debug)]
 pub enum Command {
-    #[command(description = "Start the bot & show main menu")]
     Start,
-    
-    #[command(description = "Display help message")]
     Help,
-    
-    #[command(description = "Show wallet balance")]
     Balance,
-    
-    #[command(description = "Control the AutoTrader")]
     Autotrader,
-    
-    #[command(description = "Manage trading strategies")]
     Strategy,
-    
-    #[command(description = "View and manage positions")]
     Positions,
-    
-    #[command(description = "Analyze a token's risk profile")]
     Analyze(String),
-    
-    #[command(description = "Buy a token immediately")]
     Snipe(String, f64),
+}
+
+// Parses a teloxide::types::Message into a Command.
+// Returns Some(Command) if parsing succeeds, or None if the message is not a valid command.
+pub fn parse_command(msg: &Message) -> Option<Command> {
+    let text = msg.text()?;
+    let mut parts = text.trim().split_whitespace();
+    let cmd = parts.next()?.trim_start_matches('/').split('@').next()?.to_lowercase();
+
+    match cmd.as_str() {
+        "start" => Some(Command::Start),
+        "help" => Some(Command::Help),
+        "balance" => Some(Command::Balance),
+        "autotrader" => Some(Command::Autotrader),
+        "strategy" => Some(Command::Strategy),
+        "positions" => Some(Command::Positions),
+        "analyze" => {
+            let address = parts.next()?;
+            Some(Command::Analyze(address.to_string()))
+        }
+        "snipe" => {
+            let address = parts.next()?;
+            let amount_str = parts.next();
+            let amount = amount_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            Some(Command::Snipe(address.to_string(), amount))
+        }
+        _ => None,
+    }
 }
 
 // --- Authorization Check ---
@@ -99,7 +119,7 @@ pub async fn command_handler(
                 .await?;
         },
         Command::Help => {
-            bot.send_message(chat_id, Command::descriptions().to_string()).await?;
+            bot.send_message(chat_id, HELP_TEXT).await?;
         },
         Command::Balance => {
              // Re-lock state briefly if needed, or pass cloned client/wallet
@@ -423,7 +443,7 @@ pub async fn command_handler(
             // 4. Execute buy using JupiterClient via WalletManager
             // --- Execute Snipe Logic ---
             let auto_trader = locked_state.auto_trader.clone(); // Clone Arc for use
-            let wallet_manager = locked_state.wallet_manager.clone(); // Clone Arc
+            let wallet_manager = locked_state.wallet_manager.as_ref().expect("WalletManager not initialized").clone(); // Unwrap before clone
             let config = locked_state.config.clone(); // Clone config
 
             // Drop the main state lock before potentially long async operations
@@ -893,7 +913,7 @@ pub async fn callback_handler(
                      // Get current strategy details to pre-fill the form
                      let strategy = locked_state.auto_trader.lock().await.get_strategy(strategy_id).await;
                      
-                     if let Ok(s) = strategy {
+                     if let Some(s) = strategy {
                          if let Some(chat) = chat_id {
                              let form_message = format!(
                                  "✏️ *Edit Strategy: {}*\n\n\
@@ -1108,7 +1128,7 @@ pub async fn callback_handler(
                                  // Return to strategy detail or list
                                  if let Some(strategy_id) = extra_param {
                                      let strategy = locked_state.auto_trader.lock().await.get_strategy(strategy_id).await;
-                                     if let Ok(s) = strategy {
+                                     if let Some(s) = strategy {
                                          let detail_message = format!(
                                              "📊 *Strategy Details: {}*\n\n\
                                              *ID:* `{}`\n\
@@ -1181,7 +1201,7 @@ pub async fn callback_handler(
                  notification_text = Some(balance_message);
              }
              "show_help" => {
-                 notification_text = Some(Command::descriptions().to_string());
+                 notification_text = Some(HELP_TEXT.to_string());
              }
              "autotrader_performance" => {
                  // Fetch and display performance stats from AutoTrader
@@ -1524,37 +1544,48 @@ pub async fn callback_handler(
 
 pub async fn start_bot(bot: Bot, state: Arc<Mutex<BotState>>) -> ResponseResult<()> {
     info!("Starting Telegram bot");
-    
-    // Set bot commands
-    bot.set_my_commands(Command::bot_commands()).await?;
-    
-    // Create message handler
+
+    // Set bot commands (optional, for Telegram UI)
+    // bot.set_my_commands(Command::bot_commands()).await?;
+
+    // Create message handler: filter messages starting with '/' and route to message_command_handler
     let message_handler = Update::filter_message()
-        .branch(
-            dptree::entry()
-                .filter_command::<Command>()
-                .endpoint(command_handler),
-        )
-        .branch(dptree::endpoint(handle_message));
+        .filter(|msg: &Message| msg.text().map_or(false, |t| t.trim_start().starts_with('/')))
+        .endpoint(message_command_handler);
 
     // Create callback handler
     let callback_handler = Update::filter_callback_query()
         .endpoint(callback_handler);
-        
+
     // Create combined handler
     let handler = dptree::entry()
         .branch(message_handler)
         .branch(callback_handler);
-        
+
     // Create dispatcher
     let mut dispatcher = Dispatcher::builder(bot, handler)
         .enable_ctrlc_handler()
         .build();
-    
+
     // Start dispatcher
     dispatcher.dispatch().await;
-    
+
     Ok(())
+}
+
+/// Handler for messages that are commands (start with '/')
+async fn message_command_handler(
+    bot: Bot,
+    msg: Message,
+    state: Arc<Mutex<BotState>>,
+) -> ResponseResult<()> {
+    if let Some(cmd) = parse_command(&msg) {
+        command_handler(bot, msg, cmd, state).await
+    } else {
+        // Unknown or invalid command
+        bot.send_message(msg.chat.id, "Unknown command or invalid arguments. Use /help for a list of commands.").await?;
+        Ok(())
+    }
 }
 
 // Add the handle_message function

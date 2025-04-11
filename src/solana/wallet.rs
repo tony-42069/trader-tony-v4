@@ -105,7 +105,7 @@ impl WalletManager {
         }
 
         // Fetch recent blockhash just before signing (important!)
-        let recent_blockhash = self.solana_client.get_rpc().get_latest_blockhash()?; // Use Arc<RpcClient> directly
+        let recent_blockhash = self.solana_client.get_rpc().get_latest_blockhash().await?; // Use Arc<RpcClient> directly
         transaction.message.set_recent_blockhash(recent_blockhash);
 
         // Sign the VersionedTransaction using the keypair
@@ -150,6 +150,7 @@ impl WalletManager {
     }
 
     // Helper to sign a legacy transaction (less common now)
+    #[allow(dead_code)]
     pub async fn sign_legacy_transaction(&self, mut transaction: Transaction) -> Result<Transaction> {
          let recent_blockhash = self.solana_client.get_rpc().get_latest_blockhash().await?;
          transaction
