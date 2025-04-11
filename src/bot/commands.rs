@@ -1548,9 +1548,8 @@ pub async fn start_bot(bot: Bot, state: Arc<Mutex<BotState>>) -> ResponseResult<
     // Set bot commands (optional, for Telegram UI)
     // bot.set_my_commands(Command::bot_commands()).await?;
 
-    // Create message handler: filter messages starting with '/' and route to message_command_handler
+    // Create message handler: route all messages to message_command_handler
     let message_handler = Update::filter_message()
-        .filter(|msg: &Message| msg.text().map_or(false, |t| t.trim_start().starts_with('/')))
         .endpoint(message_command_handler);
 
     // Create callback handler
@@ -1564,6 +1563,7 @@ pub async fn start_bot(bot: Bot, state: Arc<Mutex<BotState>>) -> ResponseResult<
 
     // Create dispatcher
     let mut dispatcher = Dispatcher::builder(bot, handler)
+        .dependencies(dptree::deps![state.clone()])
         .enable_ctrlc_handler()
         .build();
 
@@ -1579,13 +1579,20 @@ async fn message_command_handler(
     msg: Message,
     state: Arc<Mutex<BotState>>,
 ) -> ResponseResult<()> {
-    if let Some(cmd) = parse_command(&msg) {
-        command_handler(bot, msg, cmd, state).await
-    } else {
-        // Unknown or invalid command
-        bot.send_message(msg.chat.id, "Unknown command or invalid arguments. Use /help for a list of commands.").await?;
-        Ok(())
+    // Only process messages that start with '/'
+    if let Some(text) = msg.text() {
+        if text.trim_start().starts_with('/') {
+            if let Some(cmd) = parse_command(&msg) {
+                return command_handler(bot, msg, cmd, state).await;
+            } else {
+                // Unknown or invalid command
+                bot.send_message(msg.chat.id, "Unknown command or invalid arguments. Use /help for a list of commands.").await?;
+                return Ok(());
+            }
+        }
     }
+    // Ignore non-command messages
+    Ok(())
 }
 
 // Add the handle_message function

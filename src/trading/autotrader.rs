@@ -346,7 +346,7 @@ async fn execute_buy_task(
                 &token.address,
                 &token.name,
                 &token.symbol,
-                token.decimals,
+                token_decimals,
                 &strategy.id,
                 position_size_sol, // Entry value in SOL
                 actual_out_amount, // Amount of token received
@@ -398,8 +398,8 @@ pub struct AutoTrader {
 }
 
 impl AutoTrader {
-    // Update constructor to return Result<Self> and accept Config by value or Arc
-    pub fn new(
+    // FIXED VERSION: Changed to async to avoid block_on issues
+    pub async fn new(
         wallet_manager: Arc<WalletManager>,
         solana_client: Arc<SolanaClient>,
         config: Arc<Config>, // Keep Arc<Config>
@@ -448,8 +448,8 @@ impl AutoTrader {
             strategies_path,
         };
         
-        // Initialize by loading strategies
-        match tokio::runtime::Handle::current().block_on(autotrader.load_strategies()) {
+        // Initialize by loading strategies - use await directly since we're in an async function
+        match autotrader.load_strategies().await {
             Ok(_) => {
                 info!("AutoTrader initialized successfully with strategies loaded");
                 Ok(autotrader)
@@ -942,9 +942,4 @@ impl AutoTrader {
             }
         }
     }
-
-} // This brace closes the impl AutoTrader block
-
-// Note: Removed the manual Clone implementation as it was complex and likely incorrect.
-// If AutoTrader needs to be cloned (e.g., for passing to multiple handlers),
-// ensure all fields are properly handled (usually by cloning Arcs).
+}

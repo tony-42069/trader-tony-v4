@@ -56,13 +56,13 @@ async fn main() -> Result<()> {
         wallet_manager.clone(),
         wallet_manager.solana_client().clone(),
         config.clone(), // Already Arc<Config>
-    )?; // Handle potential error from AutoTrader::new
+    ).await?; // Handle potential error from AutoTrader::new
     info!("AutoTrader initialized");
 
     // Set up shared state for Teloxide
     let bot_state = bot::BotState {
         auto_trader: Arc::new(Mutex::new(auto_trader)),
-        wallet_manager: None, // Will be inside AutoTrader now
+        wallet_manager: Some(wallet_manager.clone()),
         solana_client: None, // Will be inside AutoTrader now
         config: config.clone(),
         authorized_users: config.authorized_users.clone(), // Use correct field name
