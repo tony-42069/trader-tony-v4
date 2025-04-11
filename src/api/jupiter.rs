@@ -5,11 +5,13 @@ use serde::{Deserialize, Serialize};
 use solana_sdk::{
     pubkey::Pubkey,
     signature::Signature,
+    transaction::EncodedTransactionEnum, // <-- Add this import
 };
 use std::{
     sync::Arc,
     time::Duration,
     str::FromStr,
+    ops::Deref,
 };
 use tracing::{debug, error, info, warn}; // Added warn
 
@@ -299,8 +301,7 @@ impl JupiterClient {
             .context("Failed to get swap transaction")?;
 
         // 3. Decode, Sign, Send Transaction
-        // use base64::{engine::general_purpose::STANDARD, Engine as _}; // No longer needed here
-        let transaction_bytes = STANDARD.decode(&swap_response.swap_transaction) // Use STANDARD engine
+        let transaction_bytes = STANDARD.decode(&swap_response.swap_transaction)
             .context("Failed to decode swap transaction")?;
 
         // Deserialize as VersionedTransaction (recommended)
@@ -378,8 +379,7 @@ impl JupiterClient {
             .context("Failed to get swap transaction")?;
 
         // 3. Decode, Sign, Send Transaction
-        // use base64::{engine::general_purpose::STANDARD, Engine as _}; // No longer needed here
-        let transaction_bytes = STANDARD.decode(&swap_response.swap_transaction) // Use STANDARD engine
+        let transaction_bytes = STANDARD.decode(&swap_response.swap_transaction)
             .context("Failed to decode swap transaction")?;
         let versioned_tx: solana_sdk::transaction::VersionedTransaction =
             bincode::deserialize(&transaction_bytes)
@@ -441,13 +441,13 @@ impl JupiterClient {
             }
             
             // Look at post token balances to find the actual amount received
-            if let Some(post_balances_serializer) = meta.post_token_balances.as_ref() {
+            if let Some(post_balances_serializer) = meta.post_token_balances.as_ref().map(Deref::deref) {
                 // Get the wallet public key
                 // --- SDK v1.17+ compatible: extract wallet key from VersionedTransaction ---
                 // Get the base64 encoded string based on the enum variant
                 let encoded_tx_str = match &tx_details.transaction.transaction {
-                    solana_sdk::transaction::EncodedTransactionEnum::Legacy(s)
-                    | solana_sdk::transaction::EncodedTransactionEnum::Versioned(s) => s,
+                    EncodedTransactionEnum::Legacy(s)
+                    | EncodedTransactionEnum::Versioned(s) => s,
                     _ => {
                         warn!("Transaction data is not in expected Legacy/Versioned string format for tx {}", signature);
                         return Ok(None);
@@ -465,7 +465,7 @@ impl JupiterClient {
                     }
                 };
 
-                // Use post_balances_serializer directly as a Vec
+                // Use post_balances_serializer.iter() (Deref)
                 let token_account = post_balances_serializer.iter()
                     .find(|balance| 
                         balance.mint == output_mint && 
@@ -483,7 +483,7 @@ impl JupiterClient {
 
                 // If we couldn't find the specific token account, try an alternative approach
                 // This is a fallback that looks at all post balances for the output mint
-                for balance in post_balances_serializer {
+                for balance in post_balances_serializer.iter() {
                     if balance.mint == output_mint {
                         if let Some(amount) = &balance.ui_token_amount {
                             let amount_raw = amount.ui_amount.unwrap_or(0.0);
@@ -496,11 +496,11 @@ impl JupiterClient {
             
             // Another approach: Parse the logs to find the token transfer amount
             // Jupiter often emits specific logs with transfer amounts
-            if let Some(logs_serializer) = meta.log_messages.as_ref() {
+            if let Some(logs_serializer) = meta.log_messages.as_ref().map(Deref::deref) {
                 debug!("Attempting to parse logs for actual token amount in transaction {}", signature);
 
-                // Use logs_serializer directly as a Vec
-                for log in logs_serializer {
+                // Use logs_serializer.iter() (Deref)
+                for log in logs_serializer.iter() {
                     // Example patterns to look for in logs (these would need to be customized)
                     if log.contains("Transfer:") && log.contains(output_mint) {
                         // Example of parsing a log entry like: "Transfer: 123.45 tokens"
