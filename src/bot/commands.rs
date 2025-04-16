@@ -46,15 +46,22 @@ pub fn parse_command(msg: &Message) -> Option<Command> {
         "start" => Some(Command::Start),
         "help" => Some(Command::Help),
         "balance" => Some(Command::Balance),
+        "wallet" => Some(Command::Balance),
         "autotrader" => Some(Command::Autotrader),
         "strategy" => Some(Command::Strategy),
         "positions" => Some(Command::Positions),
         "analyze" => {
-            let address = parts.next()?;
+            let address = parts.next().unwrap_or("");
             Some(Command::Analyze(address.to_string()))
         }
         "snipe" => {
-            let address = parts.next()?;
+            let address = parts.next().unwrap_or("");
+            let amount_str = parts.next();
+            let amount = amount_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            Some(Command::Snipe(address.to_string(), amount))
+        }
+        "buy" => {
+            let address = parts.next().unwrap_or("");
             let amount_str = parts.next();
             let amount = amount_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
             Some(Command::Snipe(address.to_string(), amount))
@@ -1582,8 +1589,22 @@ async fn message_command_handler(
     // Only process messages that start with '/'
     if let Some(text) = msg.text() {
         if text.trim_start().starts_with('/') {
+            // Try to parse the command
             if let Some(cmd) = parse_command(&msg) {
-                return command_handler(bot, msg, cmd, state).await;
+                // For /analyze and /snipe, check if required arguments are present
+                match &cmd {
+                    Command::Analyze(token_address) if token_address.trim().is_empty() => {
+                        bot.send_message(msg.chat.id, "⚠️ Please provide a token address after /analyze.").await?;
+                        return Ok(());
+                    }
+                    Command::Snipe(token_address, _) if token_address.trim().is_empty() => {
+                        bot.send_message(msg.chat.id, "⚠️ Please provide a token address after /snipe.").await?;
+                        return Ok(());
+                    }
+                    _ => {
+                        return command_handler(bot, msg, cmd, state).await;
+                    }
+                }
             } else {
                 // Unknown or invalid command
                 bot.send_message(msg.chat.id, "Unknown command or invalid arguments. Use /help for a list of commands.").await?;

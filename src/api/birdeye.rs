@@ -100,19 +100,15 @@ impl BirdeyeClient {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            error!("Birdeye Token Overview API error for token {}: {} - {}", token_address, status, error_text);
-            // Return Ok(None) to indicate data couldn't be fetched due to API error
+            warn!("Birdeye Token Overview API error for token {}: {} - {}", token_address, status, error_text);
             return Ok(None);
         }
 
         let response_data: TokenOverviewResponse = match response.json().await {
             Ok(data) => data,
             Err(e) => {
-                error!("Failed to parse Birdeye Token Overview API response for {}: {:?}", token_address, e);
-                // Return specific error for parsing failure
-                return Err(TraderbotError::ApiError(format!(
-                    "Failed to parse Birdeye Token Overview response for {}: {}", token_address, e
-                )).into());
+                warn!("Failed to parse Birdeye Token Overview API response for {}: {:?}; ignoring", token_address, e);
+                return Ok(None);
             }
         };
 
@@ -144,25 +140,19 @@ impl BirdeyeClient {
          if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            error!("Birdeye SOL Price API error: {} - {}", status, error_text);
-            return Err(TraderbotError::ApiError(format!(
-                "Birdeye SOL Price API failed with status {}: {}", status, error_text
-            )).into());
+            warn!("Birdeye SOL Price API error: {} - {}; returning 0", status, error_text);
+            return Ok(0.0);
         }
 
-        let response_data: PriceResponse = response
-            .json()
-            .await
-            .context("Failed to parse Birdeye SOL Price API response")?;
-
-        if let Some(data) = response_data.data {
-            if data.value > 0.0 {
-                Ok(data.value)
-            } else {
-                Err(anyhow!("Birdeye returned invalid SOL price: {}", data.value))
+        let response_data: PriceResponse = match response.json().await {
+            Ok(data) => data,
+            Err(e) => {
+                warn!("Failed to parse Birdeye SOL Price API response: {:?}; returning 0", e);
+                return Ok(0.0);
             }
-        } else {
-            Err(anyhow!("Birdeye returned no data for SOL price"))
-        }
+        };
+
+        let price = response_data.data.map(|d| d.value).unwrap_or(0.0);
+        Ok(price)
     }
 }

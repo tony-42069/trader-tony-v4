@@ -48,7 +48,8 @@ pub struct QuoteResponse {
     pub slippage_bps: u32,
     #[serde(rename = "platformFee")]
     pub platform_fee: Option<PlatformFee>,
-    pub price_impact_pct: String,
+    #[serde(rename = "priceImpactPct", default)]
+    pub price_impact_pct: Option<String>,
     #[serde(rename = "routePlan")]
     pub route_plan: Vec<RoutePlan>,
     #[serde(rename = "contextSlot")]
@@ -66,6 +67,7 @@ pub struct PlatformFee {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RoutePlan {
+    #[serde(rename = "swapInfo")]
     pub swap_info: SwapInfo,
     pub percent: u8,
 }
@@ -170,10 +172,17 @@ impl JupiterClient {
                 "Jupiter Quote API failed with status {}: {}", status, error_text
             )).into());
         }
-        let quote: QuoteResponse = response
-            .json()
+        // Fallback for both v6 (wrapper) and v5 (direct)
+        let body = response
+            .text()
             .await
-            .context("Failed to parse Jupiter Quote API response")?;
+            .context("Failed to read Jupiter Quote API response body")?;
+        let quote = match serde_json::from_str::<QuoteResponseWrapper>(&body) {
+            Ok(wrapper) => wrapper.data.into_iter().next()
+                .ok_or_else(|| TraderbotError::ApiError("Jupiter Quote API returned empty data".to_string()))?,
+            Err(_) => serde_json::from_str::<QuoteResponse>(&body)
+                .context("Failed to parse Jupiter Quote API response")?,
+        };
         debug!("Received Jupiter quote: {:?}", quote);
         if quote.in_amount.parse::<u64>().unwrap_or(0) == 0 || quote.out_amount.parse::<u64>().unwrap_or(0) == 0 {
              warn!("Received quote with zero in/out amount: {:?}", quote);
@@ -240,7 +249,7 @@ impl JupiterClient {
         let estimated_out_lamports = quote.out_amount.parse::<u64>()
             .context("Failed to parse quote out_amount")?;
         let estimated_out_ui = estimated_out_lamports as f64 / 10f64.powi(token_decimals as i32);
-        let price_impact = quote.price_impact_pct.parse::<f64>().unwrap_or(0.0);
+        let price_impact = quote.price_impact_pct.as_deref().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
         info!("Quote received: {:.6} SOL -> {:.6} {} (Price Impact: {:.4}%)", 
               amount_sol, estimated_out_ui, token_mint, price_impact);
 
@@ -297,7 +306,7 @@ impl JupiterClient {
         let estimated_out_lamports = quote.out_amount.parse::<u64>()
             .context("Failed to parse quote out_amount")?;
         let estimated_out_ui = estimated_out_lamports as f64 / 1_000_000_000.0;
-        let price_impact = quote.price_impact_pct.parse::<f64>().unwrap_or(0.0);
+        let price_impact = quote.price_impact_pct.as_deref().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
         info!("Quote received: {:.6} {} -> {:.6} SOL (Price Impact: {:.4}%)", 
               token_amount_ui, token_mint, estimated_out_ui, price_impact);
 
@@ -424,4 +433,10 @@ impl JupiterClient {
         debug!("Price calculated: 1 {} = {:.9} {}", output_mint, price, input_mint);
         Ok(price)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct QuoteResponseWrapper {
+    #[serde(rename = "data")]
+    pub data: Vec<QuoteResponse>,
 }
