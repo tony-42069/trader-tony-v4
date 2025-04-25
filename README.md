@@ -1,5 +1,10 @@
 # TraderTony V4
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![Solana](https://img.shields.io/badge/Solana-1.17-blue.svg)](https://solana.com/)
+[![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-blue.svg)](https://core.telegram.org/bots)
+
 An autonomous trading bot for Solana memecoins with advanced risk analysis, built in Rust.
 
 ## Features
