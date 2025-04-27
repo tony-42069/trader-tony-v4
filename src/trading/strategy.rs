@@ -233,22 +233,4 @@ pub mod persistence {
         Ok(())
     }
     
-    // Create default strategies when none exist
-    fn create_default_strategies() -> HashMap<String, Strategy> {
-        let mut strategies = HashMap::new();
-        
-        // Create a default balanced strategy
-        let default_strategy = Strategy::default("Default");
-        strategies.insert(default_strategy.id.clone(), default_strategy);
-        
-        // Create a conservative strategy
-        let conservative_strategy = Strategy::conservative("Conservative");
-        strategies.insert(conservative_strategy.id.clone(), conservative_strategy);
-        
-        // Create an aggressive strategy
-        let aggressive_strategy = Strategy::aggressive("Aggressive");
-        strategies.insert(aggressive_strategy.id.clone(), aggressive_strategy);
-        
-        strategies
-    }
 }
