@@ -704,7 +704,7 @@ impl PositionManager {
         // Process each active position individually to avoid holding lock for too long
         for position_id in active_ids {
             let mut current_price_sol_opt: Option<f64> = None;
-            let mut position_snapshot: Option<Position> = None; // To hold position data outside lock
+            let position_snapshot: Option<Position>; // To hold position data outside lock
 
             // --- Step 1: Get Position & Fetch Price ---
             { // Scope for read lock
