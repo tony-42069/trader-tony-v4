@@ -1617,7 +1617,7 @@ async fn message_command_handler(
 }
 
 // Add the handle_message function
-async fn handle_message(bot: Bot, msg: Message, state: Arc<Mutex<BotState>>) -> ResponseResult<()> {
+async fn handle_message(_bot: Bot, _msg: Message, _state: Arc<Mutex<BotState>>) -> ResponseResult<()> {
     // Default message handler - could be used for freeform conversations later
     Ok(())
 }
