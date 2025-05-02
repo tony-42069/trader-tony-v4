@@ -324,23 +324,23 @@ async fn execute_buy_task(
             
             // Log warning if fill rate is low
             if fill_rate < 95.0 {
-                warn!(
-                    "Low fill rate detected: Received {:.4} tokens ({:.1}% of expected {:.4})",
-                    actual_out_amount, fill_rate, swap_result.out_amount_ui
-                );
-                
-                // Send notification for significantly low fill rate
-                if fill_rate < 50.0 && notification_manager.is_some() {
-                    if let Some(notification_manager) = notification_manager {
-                        notification_manager.send_error_alert(
-                            &format!("⚠️ Very low fill rate in trade: only {:.1}% filled", fill_rate),
-                            &format!("Trade for {} only received {:.4} tokens ({:.1}% of expected {:.4})", 
-                                token.symbol, actual_out_amount, fill_rate, swap_result.out_amount_ui
-                            )
-                        ).await;
+                    warn!(
+                        "Low fill rate detected: Received {:.4} tokens ({:.1}% of expected {:.4})",
+                        actual_out_amount, fill_rate, swap_result.out_amount_ui
+                    );
+                    
+                    // Send notification for significantly low fill rate
+                    if fill_rate < 50.0 && notification_manager.is_some() {
+                        if let Some(notification_manager) = notification_manager {
+                            notification_manager.send_error_alert(
+                                &format!("⚠️ Very low fill rate in trade: only {:.1}% filled", fill_rate),
+                                &format!("Trade for {} only received {:.4} tokens ({:.1}% of expected {:.4})", 
+                                    token.symbol, actual_out_amount, fill_rate, swap_result.out_amount_ui
+                                )
+                            ).await;
+                        }
                     }
                 }
-            }
 
             position_manager.create_position(
                 &token.address,
@@ -943,3 +943,53 @@ impl AutoTrader {
         }
     }
 }
+</file_content>
+
+Now that you have the latest state of the file, try the operation again with fewer, more precise SEARCH blocks. For large files especially, it may be prudent to try to limit yourself to <5 SEARCH/REPLACE blocks at a time, then wait for the user to respond with the result of the operation before following up with another replace_in_file call to make additional edits.
+(If you run into this error 3 times in a row, you may use the write_to_file tool as a fallback.)
+</error><environment_details>
+# VSCode Visible Files
+src/trading/autotrader.rs
+
+# VSCode Open Tabs
+src/config.rs
+src/api/mod.rs
+TODO.md
+V5_Migration_Plan.md
+README.md
+src/trading/autotrader.rs
+src/trading/strategy.rs
+src/main.rs
+src/trading/risk.rs
+src/solana/client.rs
+src/solana/wallet.rs
+.env
+src/trading/position.rs
+Cargo.toml
+src/api/birdeye.rs
+src/api/helius.rs
+.gitignore
+src/error.rs
+src/bot/mod.rs
+src/api/jupiter.rs
+src/models/mod.rs
+src/models/token.rs
+src/models/user.rs
+src/solana/mod.rs
+src/trading/mod.rs
+deployment.md
+strategy.md
+api.md
+.env.example
+src/bot/keyboards.rs
+src/bot/commands.rs
+
+# Current Time
+4/26/2025, 8:05:39 PM (America/New_York, UTC-4:00)
+
+# Context Window Usage
+109,161 / 1,048.576K tokens used (10%)
+
+# Current Mode
+ACT MODE
+</environment_details>
