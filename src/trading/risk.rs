@@ -665,14 +665,14 @@ impl RiskAnalyzer {
 
     async fn check_holder_distribution(&self, token_address: &Pubkey) -> Result<(u32, f64)> {
         debug!("Checking holder distribution for {}", token_address);
-        let (total_supply, _decimals) = match self.solana_client.get_mint_info(token_address).await { // Prefix decimals as unused
-            Ok(mint_info) => (mint_info.supply, mint_info.decimals),
+        let mint_info = match self.solana_client.get_mint_info(token_address).await {
+            Ok(info) => info.supply,
             Err(e) => {
                 warn!("Failed to get mint info for holder check {}: {:?}", token_address, e);
                 return Err(e).context("Failed to get mint info for holder check");
             }
         };
-        if total_supply == 0 { return Ok((0, 100.0)); }
+        if mint_info == 0 { return Ok((0, 100.0)); }
 
         let largest_accounts = match self.solana_client.get_token_largest_accounts(token_address).await {
             Ok(accounts) => accounts,
@@ -694,7 +694,7 @@ impl RiskAnalyzer {
                  }
              }
         }
-        let concentration_percent = if total_supply > 0 { (top_n_amount as f64 / total_supply as f64) * 100.0 } else { 0.0 };
+        let concentration_percent = if mint_info > 0 { (top_n_amount as f64 / mint_info as f64) * 100.0 } else { 0.0 };
         debug!("Top {} holders concentration for {}: {:.2}%", top_n, token_address, concentration_percent);
         Ok((holder_count_estimate, concentration_percent))
     }
