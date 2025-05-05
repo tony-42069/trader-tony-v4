@@ -663,7 +663,7 @@ impl AutoTrader {
         let wallet_manager = self.wallet_manager.clone();
         let jupiter_client = self.jupiter_client.clone();
         // Need solana_client too for RiskAnalyzer/PositionManager potentially
-        let _solana_client = self.solana_client.clone(); // Prefixed as unused for now
+        // solana_client is used implicitly by other components
 
 
         let handle = tokio::spawn(async move {
