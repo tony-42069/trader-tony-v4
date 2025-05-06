@@ -7,7 +7,6 @@ use solana_sdk::{
     transaction::VersionedTransaction,
 };
 use solana_transaction_status::{
-    EncodedTransaction,
     option_serializer::OptionSerializer,
 };
 use std::{
