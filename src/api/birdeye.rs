@@ -1,10 +1,8 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, error, warn}; // Removed info
-
-use crate::error::TraderbotError;
+use tracing::{debug, warn}; // Removed unused error import
 
 // Verified base URL
 const BIRDEYE_BASE_URL: &str = "https://public-api.birdeye.so";
