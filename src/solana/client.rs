@@ -21,7 +21,6 @@ use solana_transaction_status::{UiTransactionEncoding, EncodedConfirmedTransacti
 use spl_token::state::{Account as TokenAccount, Mint};
 use spl_associated_token_account::get_associated_token_address;
 use tokio::time::sleep;
-use rand::Rng;
 
 use crate::error::TraderbotError;
 
