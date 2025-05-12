@@ -748,7 +748,7 @@ impl PositionManager {
             }
 
             // --- Step 2: Update Position & Check Exit Conditions ---
-            if let (Some(current_price_sol), Some(position)) = (current_price_sol_opt, position_snapshot) {
+            if let (Some(current_price_sol), Some(_position)) = (current_price_sol_opt, position_snapshot) {
                  // Re-acquire write lock briefly to update and check
                  let mut exit_reason_opt: Option<PositionStatus> = None;
                  { // Scope for write lock
