@@ -133,7 +133,7 @@ impl Strategy {
 // Utility functions for strategy persistence (independent of AutoTrader)
 pub mod persistence {
     use super::*;
-    use anyhow::{anyhow, Context, Result};
+    use anyhow::{Context, Result};
     use serde_json;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
