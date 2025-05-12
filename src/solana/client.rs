@@ -382,11 +382,11 @@ impl SolanaClient {
     pub async fn get_transaction(
         &self,
         signature: &Signature,
-        _commitment: CommitmentConfig,
+        _commitment: CommitmentLevel,
     ) -> Result<EncodedConfirmedTransactionWithStatusMeta> {
         let config = RpcTransactionConfig {
             encoding: Some(UiTransactionEncoding::Json),
-            commitment: Some(commitment),
+            commitment: Some(_commitment),
             max_supported_transaction_version: Some(0),
         };
         
