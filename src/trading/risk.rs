@@ -614,8 +614,7 @@ impl RiskAnalyzer {
             &token_address_str,
             &sol_mint_str,
             estimated_token_out,
-            token_decimals,  // Now using the actual token decimals
-            100
+            100 // slippage_bps
         ).await {
              Ok(q) => q,
              Err(e) => {

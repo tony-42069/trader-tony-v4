@@ -159,16 +159,16 @@ pub mod persistence {
         
         // Check if the strategies file exists
         if !file_path.exists() {
-            info!("Strategies file not found at {:?}, starting with default strategies", file_path);
-            return Ok(create_default_strategies());
+            info!("Strategies file not found at {:?}, starting with an empty strategy set.", file_path);
+            return Ok(HashMap::new());
         }
         
         info!("Loading strategies from {:?}...", file_path);
         let data = match fs::read_to_string(file_path).await {
             Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!("Strategies file not found (race condition?), starting with default strategies");
-                return Ok(create_default_strategies());
+                info!("Strategies file not found (race condition?), starting with an empty strategy set.");
+                return Ok(HashMap::new());
             }
             Err(e) => {
                 return Err(e).context(format!("Failed to read strategies file: {:?}", file_path));
@@ -176,15 +176,15 @@ pub mod persistence {
         };
         
         if data.trim().is_empty() {
-            info!("Strategies file is empty, using default strategies");
-            return Ok(create_default_strategies());
+            info!("Strategies file is empty, using an empty strategy set.");
+            return Ok(HashMap::new());
         }
         
         // Deserialize from JSON into a Vec<Strategy>
         let loaded_strategies: Vec<Strategy> = match serde_json::from_str(&data) {
             Ok(s) => s,
             Err(e) => {
-                error!("Failed to deserialize strategies from {:?}: {}. Using default strategies", file_path, e);
+                error!("Failed to deserialize strategies from {:?}: {}. Using an empty strategy set.", file_path, e);
                 // Optionally back up the corrupted file
                 let backup_path = file_path.with_extension("json.bak");
                 if let Err(backup_err) = fs::copy(file_path, &backup_path).await {
@@ -192,7 +192,7 @@ pub mod persistence {
                 } else {
                     info!("Created backup of corrupted strategies file at {:?}", backup_path);
                 }
-                return Ok(create_default_strategies());
+                return Ok(HashMap::new());
             }
         };
         

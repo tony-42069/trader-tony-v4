@@ -943,7 +943,6 @@ impl AutoTrader {
         }
     }
 }
-</file_content>
 
 Now that you have the latest state of the file, try the operation again with fewer, more precise SEARCH blocks. For large files especially, it may be prudent to try to limit yourself to <5 SEARCH/REPLACE blocks at a time, then wait for the user to respond with the result of the operation before following up with another replace_in_file call to make additional edits.
 (If you run into this error 3 times in a row, you may use the write_to_file tool as a fallback.)
