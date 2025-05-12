@@ -296,7 +296,7 @@ impl SolanaClient {
     pub async fn confirm_transaction(
         &self,
         signature: &Signature,
-        commitment: CommitmentLevel,
+        _commitment: CommitmentLevel,
         timeout_secs: u64,
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
