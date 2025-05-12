@@ -2,7 +2,6 @@ use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup}; // Import inline keyboard types
-use teloxide::utils::command::BotCommands;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn}; // Added warn
 
