@@ -9,7 +9,6 @@ use tracing::{error, info, warn}; // Added warn
 use crate::bot::keyboards; // Assuming keyboards module exists for callbacks
 use crate::bot::BotState;
 use crate::trading::position::{Position, PositionStatus}; // Add Position and PositionStatus imports
-use crate::config::Config;
 
 // Manual help text for bot commands (replaces Command::descriptions())
 const HELP_TEXT: &str = "\
