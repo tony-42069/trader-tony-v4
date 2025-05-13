@@ -602,13 +602,6 @@ impl RiskAnalyzer {
 
 
         // --- Simulate Sell ---
-        let token_decimals = match self.solana_client.get_mint_info(token_address).await {
-             Ok(info) => info.decimals,
-             Err(e) => {
-                 warn!("Sellability Check: Failed to get decimals for {}: {:?}. Cannot simulate sell.", token_address_str, e);
-                 return Ok(false);
-             }
-        };
 
         let sell_quote = match self.jupiter_client.get_quote(
             &token_address_str,
