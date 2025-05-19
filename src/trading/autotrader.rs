@@ -667,36 +667,3 @@ impl AutoTrader {
 
 
         let handle = tokio::spawn(async move {
-            let scan_interval = Duration::from_secs(60); // Configurable?
-            let mut interval_timer = interval(scan_interval);
-            interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip); // Skip ticks if busy
-
-            info!("AutoTrader background task started.");
-
-            loop {
-                 // Check running status without holding lock for long
-                if !*running_flag.read().await { // Use cloned running Arc
-                    info!("AutoTrader running flag is false, stopping background task.");
-                    break;
-                }
-
-                interval_timer.tick().await; // Wait for the next interval
-
-                debug!("AutoTrader tick: Performing scan and manage cycle.");
-
-                // Call the standalone scan cycle function
-                if let Err(e) = run_scan_cycle(
-                    strategies.clone(),
-                    helius_client.clone(),
-                    risk_analyzer.clone(),
-                    position_manager.clone(),
-                    config.clone(),
-                    wallet_manager.clone(),
-                    jupiter_client.clone(),
-                    // solana_client is implicitly used by others
-                ).await {
-                    error!("Error during scan cycle: {}", e);
-                }
-
-                // Position management is handled by PositionManager's own task,
-                // so no need to call manage_positions here
