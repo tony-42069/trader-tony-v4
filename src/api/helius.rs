@@ -289,7 +289,64 @@ impl HeliusClient {
         Ok(tokens)
     }
     
+    /// Gets detailed token metadata for a specific token address
+    pub async fn get_token_metadata(&self, token_address: &str) -> Result<TokenMetadata> {
+        // Use the getAsset endpoint to get detailed information about a specific asset
+        let url = format!("{}/v0/das/asset?api-key={}&id={}", HELIUS_BASE_URL, self.api_key, token_address);
+
+        debug!("Fetching token metadata for: {}", token_address);
+
+        let response = self.client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to send request to Helius getAsset API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            error!("Helius getAsset API error: {} - {}", status, error_text);
+            anyhow::bail!("Helius getAsset API error: {} - {}", status, error_text);
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct HeliusAssetResponse {
+            result: DasAsset,
+        }
+
+        let asset_response_wrapper: HeliusAssetResponse = response
+            .json()
+            .await
+            .context("Failed to parse Helius getAsset API response")?;
+
+        let asset = asset_response_wrapper.result;
+
+        // Convert DAS asset to TokenMetadata
+        let metadata = asset.content.as_ref()
+            .and_then(|c| c.metadata.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("No metadata found for token {}", token_address))?;
+
+        let token_name = metadata.name.clone().unwrap_or_else(|| "Unknown Token".to_string());
+        let token_symbol = metadata.symbol.clone().unwrap_or_else(|| "UNK".to_string());
+
+        // For SPL tokens, we need to get additional info like decimals and supply
+        // This might require additional API calls or we use defaults
+        let decimals = 9; // Default for most SPL tokens
+        let supply = asset.supply.map(|s| s.print_current_supply as u64);
+
+        Ok(TokenMetadata {
+            address: asset.id,
+            name: token_name,
+            symbol: token_symbol,
+            decimals,
+            supply,
+            logo_uri: asset.content.as_ref()
+                .and_then(|c| c.links.as_ref())
+                .and_then(|l| l.image.clone()),
+            creation_time: None, // Would need additional logic to determine creation time
+        })
+    }
+
     // TODO: Implement methods for:
-    // - Getting detailed token metadata (getAsset endpoint)
     // - Performing security checks (requires specific Helius endpoints or logic)
 }

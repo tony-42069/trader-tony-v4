@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::{sleep, interval};
+use tokio::time::interval;
 use chrono::Utc;
 use tracing::{debug, error, info, warn}; // Added debug
 
@@ -16,7 +16,7 @@ use crate::api::jupiter::{JupiterClient, SwapResult};
 use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
 use crate::config::Config;
-use crate::trading::position::{PositionManager, PositionStatus}; // Assuming these exist
+use crate::trading::position::PositionManager; // Assuming these exist
 use crate::trading::risk::{RiskAnalysis, RiskAnalyzer}; // Assuming these exist
 use crate::trading::strategy::Strategy;
 use crate::models::token::TokenMetadata;
@@ -667,3 +667,233 @@ impl AutoTrader {
 
 
         let handle = tokio::spawn(async move {
+            // Main scanning loop
+            let mut interval = interval(Duration::from_secs(60)); // Scan every 60 seconds
+
+            loop {
+                interval.tick().await;
+
+                // Check if we should stop
+                if !*running_flag.read().await {
+                    info!("AutoTrader scanning task stopped.");
+                    break;
+                }
+
+                // Run the scan cycle
+                if let Err(e) = run_scan_cycle(
+                    strategies.clone(),
+                    helius_client.clone(),
+                    risk_analyzer.clone(),
+                    position_manager.clone(),
+                    config.clone(),
+                    wallet_manager.clone(),
+                    jupiter_client.clone(),
+                ).await {
+                    error!("Error in scan cycle: {:?}", e);
+                    // Continue running even if one cycle fails
+                }
+            }
+        });
+
+        // Store the task handle
+        let mut task_handle_guard = self.task_handle.lock().await;
+        *task_handle_guard = Some(handle);
+        drop(task_handle_guard);
+
+        info!("AutoTrader started successfully");
+        Ok(())
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        // Set running flag to false
+        let mut running_guard = self.running.write().await;
+        *running_guard = false;
+        drop(running_guard);
+
+        // Wait for the task to finish
+        let mut task_handle_guard = self.task_handle.lock().await;
+        if let Some(handle) = task_handle_guard.take() {
+            handle.await.context("Failed to wait for AutoTrader task to finish")?;
+        }
+        drop(task_handle_guard);
+
+        // Stop position manager monitoring
+        self.position_manager.stop_monitoring().await?;
+
+        info!("AutoTrader stopped successfully");
+        Ok(())
+    }
+
+    pub async fn get_status(&self) -> bool {
+        *self.running.read().await
+    }
+
+    /// Executes a manual buy for a specific token address
+    pub async fn execute_manual_buy(
+        &self,
+        token_address: &str,
+        amount_sol: f64,
+    ) -> Result<SwapResult> {
+        info!("Executing manual buy for token: {} with amount: {} SOL", token_address, amount_sol);
+
+        // Use the default strategy for manual buys
+        let strategies = self.strategies.read().await;
+        let default_strategy = strategies.values().find(|s| s.name.to_lowercase() == "default").cloned();
+
+        let strategy = match default_strategy {
+            Some(s) => s,
+            None => {
+                // Create a temporary default strategy if none exists
+                drop(strategies);
+                return self.create_default_strategy_and_buy(token_address, amount_sol).await;
+            }
+        };
+
+        drop(strategies);
+
+        // Check if we already have a position in this token
+        if self.position_manager.has_active_position(token_address).await {
+            return Err(anyhow!("Already have an active position in token {}", token_address));
+        }
+
+        // Get token metadata
+        let token_metadata = self.get_token_metadata(token_address).await?;
+
+        // Execute the buy using the existing execute_buy_task function
+        execute_buy_task(
+            &token_metadata,
+            &strategy,
+            &self.position_manager,
+            &self.jupiter_client,
+            &self.wallet_manager,
+            &self.config,
+            self.notification_manager.as_ref(),
+        ).await
+    }
+
+    /// Creates a default strategy and executes a manual buy
+    async fn create_default_strategy_and_buy(
+        &self,
+        token_address: &str,
+        amount_sol: f64,
+    ) -> Result<SwapResult> {
+        // Create a basic default strategy
+        let default_strategy = Strategy {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "Default".to_string(),
+            enabled: true,
+            max_concurrent_positions: 10,
+            max_position_size_sol: amount_sol,
+            total_budget_sol: amount_sol * 2.0,
+            stop_loss_percent: Some(15),
+            take_profit_percent: Some(50),
+            trailing_stop_percent: Some(5),
+            max_hold_time_minutes: 240,
+            min_liquidity_sol: 1,
+            max_risk_level: 80,
+            min_holders: 10,
+            max_token_age_minutes: 1440, // 24 hours
+            require_lp_burned: false,
+            reject_if_mint_authority: true,
+            reject_if_freeze_authority: true,
+            require_can_sell: true,
+            max_transfer_tax_percent: Some(5.0),
+            max_concentration_percent: Some(80.0),
+            slippage_bps: None,
+            priority_fee_micro_lamports: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Add the strategy
+        self.add_strategy(default_strategy.clone()).await?;
+
+        // Get token metadata
+        let token_metadata = self.get_token_metadata(token_address).await?;
+
+        // Execute the buy
+        execute_buy_task(
+            &token_metadata,
+            &default_strategy,
+            &self.position_manager,
+            &self.jupiter_client,
+            &self.wallet_manager,
+            &self.config,
+            self.notification_manager.as_ref(),
+        ).await
+    }
+
+    /// Gets token metadata for a given address
+    async fn get_token_metadata(&self, token_address: &str) -> Result<TokenMetadata> {
+        // Try to get from Helius first
+        match self.helius_client.get_token_metadata(token_address).await {
+            Ok(metadata) => Ok(metadata),
+            Err(_) => {
+                // If Helius fails, create basic metadata
+                Ok(TokenMetadata {
+                    address: token_address.to_string(),
+                    name: format!("Token {}", token_address),
+                    symbol: "UNKNOWN".to_string(),
+                    decimals: 9,
+                    supply: None,
+                    logo_uri: None,
+                    creation_time: None,
+                })
+            }
+        }
+    }
+
+    /// Gets performance statistics for the trading bot
+    pub async fn get_performance_stats(&self) -> Result<PerformanceStats> {
+        let positions = self.position_manager.get_all_positions().await;
+        let mut total_pnl = 0.0;
+        let mut total_trades = 0;
+        let mut winning_trades = 0;
+        let mut total_entry_value = 0.0;
+
+        for position in positions {
+            if let Some(exit_value) = position.exit_value_sol {
+                let pnl = exit_value - position.entry_value_sol;
+                total_pnl += pnl;
+                total_entry_value += position.entry_value_sol;
+                total_trades += 1;
+
+                if pnl > 0.0 {
+                    winning_trades += 1;
+                }
+            }
+        }
+
+        let win_rate = if total_trades > 0 {
+            (winning_trades as f64 / total_trades as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let avg_roi = if total_entry_value > 0.0 {
+            (total_pnl / total_entry_value) * 100.0
+        } else {
+            0.0
+        };
+
+        Ok(PerformanceStats {
+            total_trades,
+            winning_trades,
+            total_pnl,
+            win_rate,
+            avg_roi,
+            total_entry_value,
+        })
+    }
+}
+
+/// Performance statistics structure
+#[derive(Debug, serde::Serialize)]
+pub struct PerformanceStats {
+    pub total_trades: u32,
+    pub winning_trades: u32,
+    pub total_pnl: f64,
+    pub win_rate: f64,
+    pub avg_roi: f64,
+    pub total_entry_value: f64,
+}

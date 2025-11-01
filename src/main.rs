@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     info!("Wallet initialized with address: {}", wallet_manager.get_public_key());
 
     // Initialize Birdeye client
-    let birdeye_client = Arc::new(BirdeyeClient::new(
+    let _birdeye_client = Arc::new(BirdeyeClient::new(
         config.birdeye_api_key.as_ref().context("BIRDEYE_API_KEY missing")?
     ));
     info!("Birdeye client initialized");
