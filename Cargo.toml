@@ -9,9 +9,6 @@ description = "Autonomous trading bot for Solana memecoins with risk analysis"
 # Async runtime
 tokio = { version = "1.32", features = ["full"] }
 
-# Telegram bot
-teloxide = { version = "0.12", features = ["macros"] }
-
 # Web server (Axum)
 axum = "0.7"
 axum-extra = { version = "0.9", features = ["typed-header"] }

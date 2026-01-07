@@ -1,25 +1,22 @@
-use anyhow::{Context, Result}; // Import Context trait
+use anyhow::{Context, Result};
 use dotenv::dotenv;
 use std::sync::Arc;
-use teloxide::prelude::*;
 use tokio::sync::Mutex;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod api;
-mod bot;
 mod config;
 mod error;
 mod models;
 mod solana;
 mod trading;
 
-// Import command and callback handlers
 use crate::config::Config;
 use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
 use crate::trading::autotrader::AutoTrader;
-use crate::api::birdeye::BirdeyeClient; // Import BirdeyeClient
+use crate::api::birdeye::BirdeyeClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,20 +25,20 @@ async fn main() -> Result<()> {
         .with_max_level(Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
-    
+
     // Load environment variables
     dotenv().ok();
-    
+
     // Load configuration and wrap in Arc
     let config = Arc::new(Config::load()?);
     info!("Configuration loaded successfully");
 
-    // Initialize Solana client (do not wrap in Arc here)
+    // Initialize Solana client
     let solana_client = SolanaClient::new(&config.solana_rpc_url)?;
     solana_client.check_connection().await?;
     info!("Solana client initialized successfully");
 
-    // Initialize wallet manager (already returns Arc<Self>)
+    // Initialize wallet manager
     let wallet_manager = WalletManager::new(&config.solana_private_key, Arc::new(solana_client), config.demo_mode)?;
     info!("Wallet initialized with address: {}", wallet_manager.get_public_key());
 
@@ -55,42 +52,21 @@ async fn main() -> Result<()> {
     let auto_trader = AutoTrader::new(
         wallet_manager.clone(),
         wallet_manager.solana_client().clone(),
-        config.clone(), // Already Arc<Config>
-    ).await?; // Handle potential error from AutoTrader::new
+        config.clone(),
+    ).await?;
     info!("AutoTrader initialized");
 
-    // Set up shared state for Teloxide
-    let bot_state = bot::BotState {
-        auto_trader: Arc::new(Mutex::new(auto_trader)),
-        wallet_manager: Some(wallet_manager.clone()),
-        solana_client: None, // Will be inside AutoTrader now
-        config: config.clone(),
-        authorized_users: config.authorized_users.clone(), // Use correct field name
-        notification_manager: None, // Will initialize after bot creation
-    };
+    // Wrap AutoTrader in Arc<Mutex> for shared access
+    let _auto_trader = Arc::new(Mutex::new(auto_trader));
 
-    // Arc-wrap the state for thread safety
-    let state = Arc::new(Mutex::new(bot_state));
-    
-    // Initialize bot and notification manager
-    let bot = Bot::new(&config.telegram_bot_token); // Use correct field name
-    
-    // Create NotificationManager and update state
-    {
-        let notification_manager = Arc::new(bot::notification::NotificationManager::new(bot.clone(), state.clone()));
-        let mut locked_state = state.lock().await;
-        locked_state.notification_manager = Some(notification_manager.clone());
-        
-        // Set notification manager in AutoTrader
-        let mut auto_trader = locked_state.auto_trader.lock().await;
-        auto_trader.set_notification_manager(notification_manager);
-        drop(auto_trader);
-        drop(locked_state);
-    }
-    
-    // Start the Telegram bot
-    info!("Starting TraderTony V4 bot...");
-    bot::commands::start_bot(bot, state).await?;
-    
+    // TODO: Web API server will be added in Phase 1, Tasks 1.3-1.7
+    // For now, just keep the process running
+    info!("TraderTony V4 initialized. Web API server coming soon...");
+    info!("Press Ctrl+C to exit.");
+
+    // Keep the process running
+    tokio::signal::ctrl_c().await?;
+    info!("Shutdown signal received, exiting...");
+
     Ok(())
 }

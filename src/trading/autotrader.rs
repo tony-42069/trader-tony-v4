@@ -264,7 +264,7 @@ async fn execute_buy_task(
     jupiter_client: &JupiterClient, // Pass Arc<JupiterClient>
     wallet_manager: &WalletManager, // Pass Arc<WalletManager> (holds SolanaClient)
     config: &Config, // Pass Arc<Config>
-    notification_manager: Option<&Arc<crate::bot::notification::NotificationManager>>, // Add optional notification_manager
+    _notification_tx: Option<()>, // Placeholder for future WebSocket notification channel
 ) -> Result<SwapResult> { // Return SwapResult
     info!(
         "Executing buy for token {} ({}) using strategy '{}'",
@@ -324,23 +324,19 @@ async fn execute_buy_task(
             
             // Log warning if fill rate is low
             if fill_rate < 95.0 {
+                warn!(
+                    "Low fill rate detected: Received {:.4} tokens ({:.1}% of expected {:.4})",
+                    actual_out_amount, fill_rate, swap_result.out_amount_ui
+                );
+
+                // TODO: Send notification via WebSocket when implemented
+                if fill_rate < 50.0 {
                     warn!(
-                        "Low fill rate detected: Received {:.4} tokens ({:.1}% of expected {:.4})",
-                        actual_out_amount, fill_rate, swap_result.out_amount_ui
+                        "Very low fill rate in trade: only {:.1}% filled for {}",
+                        fill_rate, token.symbol
                     );
-                    
-                    // Send notification for significantly low fill rate
-                    if fill_rate < 50.0 && notification_manager.is_some() {
-                        if let Some(notification_manager) = notification_manager {
-                            notification_manager.send_error_alert(
-                                &format!("⚠️ Very low fill rate in trade: only {:.1}% filled", fill_rate),
-                                &format!("Trade for {} only received {:.4} tokens ({:.1}% of expected {:.4})", 
-                                    token.symbol, actual_out_amount, fill_rate, swap_result.out_amount_ui
-                                )
-                            ).await;
-                        }
-                    }
                 }
+            }
 
             position_manager.create_position(
                 &token.address,
@@ -390,7 +386,8 @@ pub struct AutoTrader {
     pub position_manager: Arc<PositionManager>, // Expose for references
     pub risk_analyzer: Arc<RiskAnalyzer>, // Expose for /analyze commands
     is_running: Arc<AtomicBool>,
-    notification_manager: Option<Arc<crate::bot::notification::NotificationManager>>,
+    // notification_tx will be used for WebSocket broadcasts in future
+    // notification_tx: Option<broadcast::Sender<WsMessage>>,
     strategies: Arc<RwLock<HashMap<String, Strategy>>>, // Use Arc<RwLock<..>> for shared mutable state
     running: Arc<RwLock<bool>>, // Use Arc<RwLock<..>>
     task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -441,7 +438,6 @@ impl AutoTrader {
             position_manager,
             risk_analyzer,
             is_running: Arc::new(AtomicBool::new(false)),
-            notification_manager: None,
             strategies: Arc::new(RwLock::new(HashMap::new())), // Start with empty map, will load in init
             running: Arc::new(RwLock::new(false)),
             task_handle: Arc::new(Mutex::new(None)),
@@ -618,11 +614,11 @@ impl AutoTrader {
         strategies.values().cloned().collect()
     }
 
-    /// Sets the notification manager for trade alerts
-    pub fn set_notification_manager(&mut self, notification_manager: Arc<crate::bot::notification::NotificationManager>) {
-        self.notification_manager = Some(notification_manager);
-        info!("Notification manager attached to AutoTrader");
-    }
+    // TODO: Add method to set WebSocket broadcast channel for notifications
+    // pub fn set_notification_tx(&mut self, tx: broadcast::Sender<WsMessage>) {
+    //     self.notification_tx = Some(tx);
+    //     info!("Notification channel attached to AutoTrader");
+    // }
 
     // --- Control Methods ---
 
@@ -767,7 +763,7 @@ impl AutoTrader {
             &self.jupiter_client,
             &self.wallet_manager,
             &self.config,
-            self.notification_manager.as_ref(),
+            None, // TODO: Pass WebSocket tx when implemented
         ).await
     }
 
@@ -819,7 +815,7 @@ impl AutoTrader {
             &self.jupiter_client,
             &self.wallet_manager,
             &self.config,
-            self.notification_manager.as_ref(),
+            None, // TODO: Pass WebSocket tx when implemented
         ).await
     }
 
