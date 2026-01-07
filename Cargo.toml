@@ -12,6 +12,14 @@ tokio = { version = "1.32", features = ["full"] }
 # Telegram bot
 teloxide = { version = "0.12", features = ["macros"] }
 
+# Web server (Axum)
+axum = "0.7"
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+
 # Solana
 solana-sdk = "1.17"
 solana-client = "1.17"
