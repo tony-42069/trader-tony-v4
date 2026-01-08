@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TraderTony V4 - Autonomous Solana Trading Bot</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <div class="logo">
+                <span class="logo-icon">&#9883;</span>
+                <span class="logo-text">TraderTony</span>
+                <span class="version">V4</span>
+            </div>
+            <div class="status-indicator" id="botStatus">
+                <span class="status-dot"></span>
+                <span class="status-text">Connecting...</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="demo-badge" id="demoBadge" style="display: none;">
+                DEMO MODE
+            </div>
+            <button class="btn btn-secondary" id="refreshBtn" title="Refresh Data">
+                <span class="btn-icon">&#8635;</span>
+            </button>
+            <button class="btn btn-primary" id="connectWalletBtn">
+                <span class="btn-icon">&#128279;</span>
+                Connect Wallet
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Stats Cards -->
+        <section class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Total Trades</div>
+                <div class="stat-value" id="totalTrades">-</div>
+                <div class="stat-subtitle">All time</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Win Rate</div>
+                <div class="stat-value" id="winRate">-</div>
+                <div class="stat-progress">
+                    <div class="progress-bar" id="winRateBar" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total PnL</div>
+                <div class="stat-value" id="totalPnl">-</div>
+                <div class="stat-subtitle" id="pnlSubtitle">SOL</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Avg ROI</div>
+                <div class="stat-value" id="avgRoi">-</div>
+                <div class="stat-subtitle">Per trade</div>
+            </div>
+        </section>
+
+        <!-- Two Column Layout -->
+        <div class="two-column">
+            <!-- Left Column -->
+            <div class="column">
+                <!-- Bot Wallet Card -->
+                <section class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Bot Wallet</h2>
+                        <span class="badge badge-info" id="networkBadge">Mainnet</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="wallet-info">
+                            <div class="wallet-address-row">
+                                <span class="label">Address</span>
+                                <div class="wallet-address">
+                                    <code id="walletAddress">Loading...</code>
+                                    <button class="btn-icon-only" id="copyAddressBtn" title="Copy Address">
+                                        &#128203;
+                                    </button>
+                                    <a class="btn-icon-only" id="solscanLink" href="#" target="_blank" title="View on Solscan">
+                                        &#8599;
+                                    </a>
+                                </div>
+                            </div>
+                            <div class="wallet-balance-row">
+                                <span class="label">Balance</span>
+                                <div class="wallet-balance">
+                                    <span class="balance-value" id="walletBalance">-</span>
+                                    <span class="balance-unit">SOL</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- AutoTrader Controls -->
+                <section class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">AutoTrader Controls</h2>
+                        <div class="autotrader-status" id="autotraderStatus">
+                            <span class="status-dot"></span>
+                            <span>Stopped</span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="control-row">
+                            <div class="control-info">
+                                <span class="control-label">Active Strategies</span>
+                                <span class="control-value" id="activeStrategies">0</span>
+                            </div>
+                            <div class="control-info">
+                                <span class="control-label">Open Positions</span>
+                                <span class="control-value" id="openPositions">0</span>
+                            </div>
+                        </div>
+                        <div class="control-buttons">
+                            <button class="btn btn-success" id="startTradingBtn">
+                                <span class="btn-icon">&#9658;</span>
+                                Start Trading
+                            </button>
+                            <button class="btn btn-danger" id="stopTradingBtn" disabled>
+                                <span class="btn-icon">&#9632;</span>
+                                Stop Trading
+                            </button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Token Analysis -->
+                <section class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Token Analysis</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="analyze-form">
+                            <input type="text" class="input" id="analyzeTokenInput" placeholder="Enter token address...">
+                            <button class="btn btn-primary" id="analyzeTokenBtn">Analyze</button>
+                        </div>
+                        <div class="analysis-result" id="analysisResult" style="display: none;">
+                            <div class="analysis-header">
+                                <span class="analysis-token" id="analysisToken">-</span>
+                                <span class="risk-badge" id="riskBadge">-</span>
+                            </div>
+                            <div class="analysis-grid">
+                                <div class="analysis-item">
+                                    <span class="analysis-label">Risk Level</span>
+                                    <span class="analysis-value" id="analysisRiskLevel">-</span>
+                                </div>
+                                <div class="analysis-item">
+                                    <span class="analysis-label">Liquidity</span>
+                                    <span class="analysis-value" id="analysisLiquidity">-</span>
+                                </div>
+                                <div class="analysis-item">
+                                    <span class="analysis-label">Holders</span>
+                                    <span class="analysis-value" id="analysisHolders">-</span>
+                                </div>
+                                <div class="analysis-item">
+                                    <span class="analysis-label">Can Sell</span>
+                                    <span class="analysis-value" id="analysisCanSell">-</span>
+                                </div>
+                            </div>
+                            <div class="analysis-recommendation" id="analysisRecommendation">-</div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Right Column -->
+            <div class="column column-wide">
+                <!-- Active Positions -->
+                <section class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Active Positions</h2>
+                        <span class="badge" id="positionCount">0</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-container">
+                            <table class="table" id="positionsTable">
+                                <thead>
+                                    <tr>
+                                        <th>Token</th>
+                                        <th>Entry</th>
+                                        <th>Current</th>
+                                        <th>PnL</th>
+                                        <th>Time</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="positionsBody">
+                                    <tr class="empty-row">
+                                        <td colspan="6">No active positions</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Trade History -->
+                <section class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Recent Trades</h2>
+                        <span class="badge" id="tradeCount">0</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-container">
+                            <table class="table" id="tradesTable">
+                                <thead>
+                                    <tr>
+                                        <th>Token</th>
+                                        <th>Action</th>
+                                        <th>Amount</th>
+                                        <th>PnL</th>
+                                        <th>Time</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="tradesBody">
+                                    <tr class="empty-row">
+                                        <td colspan="5">No trades yet</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </div>
+
+        <!-- Copy Trade Section -->
+        <section class="card copy-trade-section">
+            <div class="card-header">
+                <h2 class="card-title">Copy Trading</h2>
+                <span class="badge badge-warning">Coming Soon</span>
+            </div>
+            <div class="card-body">
+                <div class="copy-trade-info">
+                    <div class="copy-trade-feature">
+                        <span class="feature-icon">&#128176;</span>
+                        <div class="feature-content">
+                            <h3>Auto-Copy Trades</h3>
+                            <p>Automatically mirror the bot's trades in your own wallet</p>
+                        </div>
+                    </div>
+                    <div class="copy-trade-feature">
+                        <span class="feature-icon">&#128200;</span>
+                        <div class="feature-content">
+                            <h3>Real-Time Signals</h3>
+                            <p>Get instant notifications when the bot opens or closes positions</p>
+                        </div>
+                    </div>
+                    <div class="copy-trade-feature">
+                        <span class="feature-icon">&#128274;</span>
+                        <div class="feature-content">
+                            <h3>Your Keys, Your Coins</h3>
+                            <p>Trades execute from your wallet - you always control your funds</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="copy-trade-cta">
+                    <p class="fee-disclosure">10% performance fee on profitable trades only</p>
+                    <button class="btn btn-primary btn-large" id="enableCopyTradeBtn" disabled>
+                        Connect Wallet to Enable
+                    </button>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-left">
+            <span>TraderTony V4</span>
+            <span class="separator">|</span>
+            <span id="connectionStatus">Disconnected</span>
+        </div>
+        <div class="footer-right">
+            <a href="https://github.com/tony-42069/trader-tony-v4" target="_blank">GitHub</a>
+            <span class="separator">|</span>
+            <span id="lastUpdate">Last update: -</span>
+        </div>
+    </footer>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Scripts -->
+    <script src="js/config.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/websocket.js"></script>
+    <script src="js/wallet.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
