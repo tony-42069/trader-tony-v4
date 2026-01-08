@@ -11,12 +11,13 @@ mod error;
 mod models;
 mod solana;
 mod trading;
+mod web;
 
 use crate::config::Config;
 use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
 use crate::trading::autotrader::AutoTrader;
-use crate::api::birdeye::BirdeyeClient;
+use crate::web::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,44 +30,55 @@ async fn main() -> Result<()> {
     // Load environment variables
     dotenv().ok();
 
-    // Load configuration and wrap in Arc
+    // Load configuration
     let config = Arc::new(Config::load()?);
     info!("Configuration loaded successfully");
+    info!("Demo mode: {}", config.demo_mode);
 
     // Initialize Solana client
-    let solana_client = SolanaClient::new(&config.solana_rpc_url)?;
+    let solana_client = Arc::new(SolanaClient::new(&config.solana_rpc_url)?);
     solana_client.check_connection().await?;
     info!("Solana client initialized successfully");
 
     // Initialize wallet manager
-    let wallet_manager = WalletManager::new(&config.solana_private_key, Arc::new(solana_client), config.demo_mode)?;
+    let wallet_manager = WalletManager::new(
+        &config.solana_private_key,
+        solana_client.clone(),
+        config.demo_mode,
+    )?;
     info!("Wallet initialized with address: {}", wallet_manager.get_public_key());
-
-    // Initialize Birdeye client
-    let _birdeye_client = Arc::new(BirdeyeClient::new(
-        config.birdeye_api_key.as_ref().context("BIRDEYE_API_KEY missing")?
-    ));
-    info!("Birdeye client initialized");
 
     // Initialize AutoTrader
     let auto_trader = AutoTrader::new(
         wallet_manager.clone(),
-        wallet_manager.solana_client().clone(),
+        solana_client.clone(),
         config.clone(),
     ).await?;
     info!("AutoTrader initialized");
 
     // Wrap AutoTrader in Arc<Mutex> for shared access
-    let _auto_trader = Arc::new(Mutex::new(auto_trader));
+    let auto_trader = Arc::new(Mutex::new(auto_trader));
 
-    // TODO: Web API server will be added in Phase 1, Tasks 1.3-1.7
-    // For now, just keep the process running
-    info!("TraderTony V4 initialized. Web API server coming soon...");
-    info!("Press Ctrl+C to exit.");
+    // Auto-start trading if configured
+    if config.auto_start_trading {
+        info!("Auto-starting trading as configured...");
+        let trader = auto_trader.lock().await;
+        if let Err(e) = trader.start().await {
+            tracing::error!("Failed to auto-start trading: {}", e);
+        }
+    }
 
-    // Keep the process running
-    tokio::signal::ctrl_c().await?;
-    info!("Shutdown signal received, exiting...");
+    // Create application state for web server
+    let app_state = AppState::new(
+        auto_trader,
+        wallet_manager,
+        solana_client,
+        config.clone(),
+    );
+
+    // Start the web server
+    info!("Starting TraderTony V4 API server...");
+    web::server::start_server(app_state, config).await?;
 
     Ok(())
 }
