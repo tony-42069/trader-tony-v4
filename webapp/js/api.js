@@ -1,0 +1,466 @@
+/**
+ * TraderTony V4 - API Client
+ * Handles all HTTP communication with the Rust backend
+ */
+
+const API = {
+    // Configuration
+    baseUrl: null,
+    demoMode: false,
+
+    /**
+     * Initialize the API client
+     * @param {string} baseUrl - Backend API base URL
+     */
+    init(baseUrl = null) {
+        // Auto-detect API URL based on environment
+        if (baseUrl) {
+            this.baseUrl = baseUrl;
+        } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+            // Development - connect to local Rust server
+            this.baseUrl = 'http://127.0.0.1:3030';
+        } else {
+            // Production - use environment variable or same origin
+            this.baseUrl = window.API_BASE_URL || '';
+        }
+
+        console.log(`[API] Initialized with base URL: ${this.baseUrl}`);
+    },
+
+    /**
+     * Enable demo mode with mock data
+     */
+    enableDemoMode() {
+        this.demoMode = true;
+        console.log('[API] Demo mode enabled');
+    },
+
+    /**
+     * Disable demo mode
+     */
+    disableDemoMode() {
+        this.demoMode = false;
+        console.log('[API] Demo mode disabled');
+    },
+
+    /**
+     * Make an API request
+     * @param {string} endpoint - API endpoint
+     * @param {object} options - Fetch options
+     * @returns {Promise<object>} Response data
+     */
+    async request(endpoint, options = {}) {
+        // Return mock data in demo mode
+        if (this.demoMode) {
+            return this.getMockData(endpoint, options);
+        }
+
+        const url = `${this.baseUrl}${endpoint}`;
+        const defaultOptions = {
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        };
+
+        const mergedOptions = {
+            ...defaultOptions,
+            ...options,
+            headers: {
+                ...defaultOptions.headers,
+                ...options.headers,
+            },
+        };
+
+        try {
+            const response = await fetch(url, mergedOptions);
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new APIError(
+                    errorData.error || `HTTP ${response.status}`,
+                    response.status,
+                    errorData
+                );
+            }
+
+            return await response.json();
+        } catch (error) {
+            if (error instanceof APIError) {
+                throw error;
+            }
+            // Network error or other issue
+            throw new APIError(
+                `Network error: ${error.message}`,
+                0,
+                { originalError: error.message }
+            );
+        }
+    },
+
+    /**
+     * GET request helper
+     */
+    async get(endpoint) {
+        return this.request(endpoint, { method: 'GET' });
+    },
+
+    /**
+     * POST request helper
+     */
+    async post(endpoint, data = {}) {
+        return this.request(endpoint, {
+            method: 'POST',
+            body: JSON.stringify(data),
+        });
+    },
+
+    // ==========================================
+    // Health & Status Endpoints
+    // ==========================================
+
+    /**
+     * Check API health
+     */
+    async healthCheck() {
+        return this.get('/api/health');
+    },
+
+    /**
+     * Get full bot status
+     */
+    async getStatus() {
+        return this.get('/api/status');
+    },
+
+    // ==========================================
+    // Wallet Endpoints
+    // ==========================================
+
+    /**
+     * Get bot wallet information
+     */
+    async getWallet() {
+        return this.get('/api/wallet');
+    },
+
+    /**
+     * Get wallet balance
+     */
+    async getBalance() {
+        return this.get('/api/wallet/balance');
+    },
+
+    // ==========================================
+    // Trading Endpoints
+    // ==========================================
+
+    /**
+     * Get all active positions
+     */
+    async getPositions() {
+        return this.get('/api/positions');
+    },
+
+    /**
+     * Get trade history
+     * @param {number} limit - Maximum number of trades to return
+     */
+    async getTrades(limit = 50) {
+        return this.get(`/api/trades?limit=${limit}`);
+    },
+
+    /**
+     * Get trading statistics
+     */
+    async getStats() {
+        return this.get('/api/stats');
+    },
+
+    // ==========================================
+    // AutoTrader Endpoints
+    // ==========================================
+
+    /**
+     * Get autotrader status
+     */
+    async getAutotraderStatus() {
+        return this.get('/api/autotrader/status');
+    },
+
+    /**
+     * Start the autotrader
+     */
+    async startAutotrader() {
+        return this.post('/api/autotrader/start');
+    },
+
+    /**
+     * Stop the autotrader
+     */
+    async stopAutotrader() {
+        return this.post('/api/autotrader/stop');
+    },
+
+    // ==========================================
+    // Token Analysis Endpoints
+    // ==========================================
+
+    /**
+     * Analyze a token
+     * @param {string} mint - Token mint address
+     */
+    async analyzeToken(mint) {
+        return this.post('/api/analyze', { mint });
+    },
+
+    // ==========================================
+    // Copy Trade Endpoints
+    // ==========================================
+
+    /**
+     * Get copy trade settings
+     */
+    async getCopyTradeSettings() {
+        return this.get('/api/copytrade/settings');
+    },
+
+    /**
+     * Update copy trade settings
+     * @param {object} settings - Copy trade settings
+     */
+    async updateCopyTradeSettings(settings) {
+        return this.post('/api/copytrade/settings', settings);
+    },
+
+    /**
+     * Register wallet for copy trading
+     * @param {string} walletAddress - User's wallet address
+     * @param {string} signature - Signed message for verification
+     */
+    async registerCopyTrader(walletAddress, signature) {
+        return this.post('/api/copytrade/register', {
+            wallet_address: walletAddress,
+            signature,
+        });
+    },
+
+    // ==========================================
+    // Manual Trading Endpoints
+    // ==========================================
+
+    /**
+     * Execute a manual buy
+     * @param {string} mint - Token mint address
+     * @param {number} amountSol - Amount in SOL to spend
+     */
+    async manualBuy(mint, amountSol) {
+        return this.post('/api/trade/buy', {
+            mint,
+            amount_sol: amountSol,
+        });
+    },
+
+    /**
+     * Execute a manual sell
+     * @param {string} positionId - Position ID to sell
+     * @param {number} percentage - Percentage of position to sell (0-100)
+     */
+    async manualSell(positionId, percentage = 100) {
+        return this.post('/api/trade/sell', {
+            position_id: positionId,
+            percentage,
+        });
+    },
+
+    // ==========================================
+    // Mock Data for Demo Mode
+    // ==========================================
+
+    getMockData(endpoint, options) {
+        const method = options.method || 'GET';
+
+        // Simulate network delay
+        return new Promise((resolve) => {
+            setTimeout(() => {
+                resolve(this.generateMockResponse(endpoint, method));
+            }, 200 + Math.random() * 300);
+        });
+    },
+
+    generateMockResponse(endpoint, method) {
+        // Health check
+        if (endpoint === '/api/health') {
+            return {
+                status: 'healthy',
+                version: '4.0.0',
+                uptime_seconds: 86400,
+            };
+        }
+
+        // Status
+        if (endpoint === '/api/status') {
+            return {
+                is_running: true,
+                wallet_connected: true,
+                network: 'mainnet-beta',
+                active_positions: 2,
+                autotrader_running: true,
+            };
+        }
+
+        // Wallet
+        if (endpoint === '/api/wallet') {
+            return {
+                address: 'DemoWa11etAddressXXXXXXXXXXXXXXXXXXXXXXXX',
+                balance_sol: 5.234,
+                balance_usd: 783.45,
+                network: 'mainnet-beta',
+            };
+        }
+
+        // Positions
+        if (endpoint === '/api/positions') {
+            return {
+                positions: [
+                    {
+                        id: 'pos_001',
+                        token_symbol: 'BONK',
+                        token_mint: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+                        entry_price_sol: 0.0000234,
+                        current_price_sol: 0.0000312,
+                        entry_sol_amount: 0.5,
+                        token_amount: 21367521,
+                        current_value_sol: 0.667,
+                        pnl_sol: 0.167,
+                        pnl_percent: 33.4,
+                        opened_at: new Date(Date.now() - 3600000).toISOString(),
+                        status: 'open',
+                    },
+                    {
+                        id: 'pos_002',
+                        token_symbol: 'WIF',
+                        token_mint: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
+                        entry_price_sol: 0.0145,
+                        current_price_sol: 0.0132,
+                        entry_sol_amount: 1.0,
+                        token_amount: 68.97,
+                        current_value_sol: 0.91,
+                        pnl_sol: -0.09,
+                        pnl_percent: -9.0,
+                        opened_at: new Date(Date.now() - 7200000).toISOString(),
+                        status: 'open',
+                    },
+                ],
+            };
+        }
+
+        // Trades
+        if (endpoint.startsWith('/api/trades')) {
+            return {
+                trades: [
+                    {
+                        id: 'trade_001',
+                        token_symbol: 'MYRO',
+                        action: 'sell',
+                        amount_sol: 1.5,
+                        pnl_sol: 0.45,
+                        pnl_percent: 30.0,
+                        timestamp: new Date(Date.now() - 1800000).toISOString(),
+                        tx_signature: '4xDemo...Sig1',
+                    },
+                    {
+                        id: 'trade_002',
+                        token_symbol: 'BONK',
+                        action: 'buy',
+                        amount_sol: 0.5,
+                        pnl_sol: 0,
+                        pnl_percent: 0,
+                        timestamp: new Date(Date.now() - 3600000).toISOString(),
+                        tx_signature: '4xDemo...Sig2',
+                    },
+                    {
+                        id: 'trade_003',
+                        token_symbol: 'POPCAT',
+                        action: 'sell',
+                        amount_sol: 2.0,
+                        pnl_sol: -0.3,
+                        pnl_percent: -15.0,
+                        timestamp: new Date(Date.now() - 5400000).toISOString(),
+                        tx_signature: '4xDemo...Sig3',
+                    },
+                ],
+            };
+        }
+
+        // Stats
+        if (endpoint === '/api/stats') {
+            return {
+                total_trades: 47,
+                winning_trades: 31,
+                losing_trades: 16,
+                win_rate: 65.96,
+                total_pnl_sol: 12.45,
+                avg_roi_percent: 18.7,
+                best_trade_pnl: 2.5,
+                worst_trade_pnl: -0.8,
+                avg_hold_time_minutes: 45,
+            };
+        }
+
+        // Autotrader status
+        if (endpoint === '/api/autotrader/status') {
+            return {
+                running: true,
+                active_strategies: 3,
+                open_positions: 2,
+                last_scan: new Date(Date.now() - 30000).toISOString(),
+            };
+        }
+
+        // Autotrader start/stop
+        if (endpoint === '/api/autotrader/start' || endpoint === '/api/autotrader/stop') {
+            return {
+                success: true,
+                message: endpoint.includes('start') ? 'AutoTrader started' : 'AutoTrader stopped',
+            };
+        }
+
+        // Token analysis
+        if (endpoint === '/api/analyze') {
+            return {
+                token_address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+                symbol: 'BONK',
+                name: 'Bonk',
+                risk_level: 'medium',
+                risk_score: 45,
+                liquidity_sol: 125000,
+                holder_count: 45678,
+                can_sell: true,
+                is_honeypot: false,
+                top_holder_percent: 12.5,
+                recommendation: 'Moderate risk. Good liquidity and holder distribution. Proceed with caution.',
+            };
+        }
+
+        // Default response
+        return { success: true };
+    },
+};
+
+/**
+ * Custom API Error class
+ */
+class APIError extends Error {
+    constructor(message, status, data = {}) {
+        super(message);
+        this.name = 'APIError';
+        this.status = status;
+        this.data = data;
+    }
+}
+
+// Make APIError available globally
+window.APIError = APIError;
+
+// Auto-initialize when script loads
+API.init();
