@@ -35,8 +35,8 @@ pub async fn get_wallet(
     let address = state.wallet_manager.get_public_key().to_string();
 
     // Get SOL balance
-    let balance_sol = match state.solana_client.get_balance(&state.wallet_manager.get_public_key()).await {
-        Ok(lamports) => lamports as f64 / 1_000_000_000.0,
+    let balance_sol = match state.solana_client.get_sol_balance(&state.wallet_manager.get_public_key()).await {
+        Ok(balance) => balance,
         Err(e) => {
             error!("Failed to get wallet balance: {}", e);
             return Err((
@@ -64,23 +64,28 @@ pub async fn get_positions(
 
     let position_responses: Vec<PositionResponse> = positions
         .iter()
-        .map(|p| PositionResponse {
-            id: p.id.clone(),
-            token_address: p.token_address.clone(),
-            token_name: p.token_name.clone(),
-            token_symbol: p.token_symbol.clone(),
-            strategy_id: p.strategy_id.clone(),
-            entry_value_sol: p.entry_value_sol,
-            current_value_sol: p.current_value_sol,
-            token_amount: p.token_amount,
-            entry_price: p.entry_price_sol,
-            current_price: p.current_price_sol,
-            pnl_percent: p.pnl_percent,
-            pnl_sol: p.pnl_sol,
-            status: format!("{:?}", p.status),
-            opened_at: p.opened_at,
-            closed_at: p.closed_at,
-            exit_reason: p.exit_reason.as_ref().map(|r| format!("{:?}", r)),
+        .map(|p| {
+            // Calculate current value
+            let current_value = p.current_price_sol * p.entry_token_amount;
+
+            PositionResponse {
+                id: p.id.clone(),
+                token_address: p.token_address.clone(),
+                token_name: p.token_name.clone(),
+                token_symbol: p.token_symbol.clone(),
+                strategy_id: p.strategy_id.clone(),
+                entry_value_sol: p.entry_value_sol,
+                current_value_sol: Some(current_value),
+                token_amount: p.entry_token_amount,
+                entry_price: p.entry_price_sol,
+                current_price: Some(p.current_price_sol),
+                pnl_percent: p.pnl_percent,
+                pnl_sol: p.pnl_sol,
+                status: format!("{}", p.status),
+                opened_at: p.entry_time,
+                closed_at: p.exit_time,
+                exit_reason: Some(format!("{}", p.status)),
+            }
         })
         .collect();
 
@@ -100,23 +105,27 @@ pub async fn get_active_positions(
 
     let position_responses: Vec<PositionResponse> = positions
         .iter()
-        .map(|p| PositionResponse {
-            id: p.id.clone(),
-            token_address: p.token_address.clone(),
-            token_name: p.token_name.clone(),
-            token_symbol: p.token_symbol.clone(),
-            strategy_id: p.strategy_id.clone(),
-            entry_value_sol: p.entry_value_sol,
-            current_value_sol: p.current_value_sol,
-            token_amount: p.token_amount,
-            entry_price: p.entry_price_sol,
-            current_price: p.current_price_sol,
-            pnl_percent: p.pnl_percent,
-            pnl_sol: p.pnl_sol,
-            status: format!("{:?}", p.status),
-            opened_at: p.opened_at,
-            closed_at: p.closed_at,
-            exit_reason: p.exit_reason.as_ref().map(|r| format!("{:?}", r)),
+        .map(|p| {
+            let current_value = p.current_price_sol * p.entry_token_amount;
+
+            PositionResponse {
+                id: p.id.clone(),
+                token_address: p.token_address.clone(),
+                token_name: p.token_name.clone(),
+                token_symbol: p.token_symbol.clone(),
+                strategy_id: p.strategy_id.clone(),
+                entry_value_sol: p.entry_value_sol,
+                current_value_sol: Some(current_value),
+                token_amount: p.entry_token_amount,
+                entry_price: p.entry_price_sol,
+                current_price: Some(p.current_price_sol),
+                pnl_percent: p.pnl_percent,
+                pnl_sol: p.pnl_sol,
+                status: format!("{}", p.status),
+                opened_at: p.entry_time,
+                closed_at: p.exit_time,
+                exit_reason: Some(format!("{}", p.status)),
+            }
         })
         .collect();
 
@@ -145,19 +154,19 @@ pub async fn get_trades(
     // Convert closed positions to trades
     let mut trades: Vec<TradeResponse> = positions
         .iter()
-        .filter(|p| p.closed_at.is_some())
+        .filter(|p| p.exit_time.is_some())
         .map(|p| TradeResponse {
             id: p.id.clone(),
             token_address: p.token_address.clone(),
             token_symbol: p.token_symbol.clone(),
             action: "sell".to_string(),
             amount_sol: p.exit_value_sol.unwrap_or(0.0),
-            token_amount: p.token_amount,
+            token_amount: p.entry_token_amount,
             price: p.exit_price_sol.unwrap_or(0.0),
             pnl_sol: p.pnl_sol,
             pnl_percent: p.pnl_percent,
-            transaction_signature: p.exit_signature.clone().unwrap_or_default(),
-            timestamp: p.closed_at.unwrap_or(p.opened_at),
+            transaction_signature: p.exit_tx_signature.clone().unwrap_or_default(),
+            timestamp: p.exit_time.unwrap_or(p.entry_time),
         })
         .collect();
 
