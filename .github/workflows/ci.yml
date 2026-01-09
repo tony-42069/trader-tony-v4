@@ -1,0 +1,134 @@
+# TraderTony V4 - CI/CD Pipeline
+# Runs on pull requests and pushes to main
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # =============================================================================
+  # Rust Backend - Build and Test
+  # =============================================================================
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --all-features
+        env:
+          # Mock environment for tests
+          SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
+          HELIUS_API_KEY: test_key
+          BIRDEYE_API_KEY: test_key
+
+  # =============================================================================
+  # Security Audit
+  # =============================================================================
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run security audit
+        run: cargo audit
+        continue-on-error: true  # Don't fail build on advisories
+
+  # =============================================================================
+  # Docker Build Test
+  # =============================================================================
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: trader-tony-v4:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # =============================================================================
+  # Frontend Validation
+  # =============================================================================
+  frontend:
+    name: Frontend Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate HTML
+        run: |
+          # Check that required files exist
+          test -f webapp/index.html
+          test -f webapp/css/style.css
+          test -f webapp/js/app.js
+          test -f webapp/js/api.js
+          test -f webapp/vercel.json
+          echo "All required frontend files present"
+
+      - name: Check for console.log statements
+        run: |
+          # Warn about console.log (but don't fail)
+          if grep -r "console.log" webapp/js/*.js; then
+            echo "::warning::Found console.log statements in production code"
+          fi
+        continue-on-error: true

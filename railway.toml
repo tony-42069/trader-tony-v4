@@ -1,0 +1,47 @@
+# Railway Deployment Configuration for TraderTony V4
+# https://docs.railway.app/reference/config-as-code
+
+[build]
+# Use Nixpacks for automatic Rust detection and building
+builder = "nixpacks"
+
+# Build command - uses release profile for optimized binary
+buildCommand = "cargo build --release"
+
+[deploy]
+# Start the compiled binary
+startCommand = "./target/release/trader-tony-v4"
+
+# Health check endpoint for Railway
+healthcheckPath = "/api/health"
+healthcheckTimeout = 60
+
+# Number of replicas (keep at 1 for trading bot to avoid duplicate trades)
+numReplicas = 1
+
+# Restart policy
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+
+# Resource allocation (adjust based on plan)
+# Railway Pro plan recommended for production trading
+
+[env]
+# These serve as documentation - actual values should be set in Railway dashboard
+# DO NOT put real secrets here
+
+# Required Environment Variables:
+# SOLANA_RPC_URL - Your Helius/QuickNode RPC endpoint
+# SOLANA_PRIVATE_KEY - Bot wallet private key (base58 encoded)
+# HELIUS_API_KEY - Helius API key for token discovery
+# BIRDEYE_API_KEY - Birdeye API key for price data
+
+# Optional (have defaults):
+# JUPITER_API_KEY - Jupiter API key (optional, for priority access)
+# API_HOST - Default: 0.0.0.0
+# API_PORT - Default: $PORT (Railway sets this automatically)
+# CORS_ORIGINS - Default: * (set to your Vercel domain in production)
+# DEMO_MODE - Default: false
+# AUTO_START_TRADING - Default: false
+# TREASURY_WALLET - Wallet address for fee collection
+# COPY_TRADE_FEE_PERCENT - Default: 10.0
