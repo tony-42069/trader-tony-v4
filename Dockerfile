@@ -57,9 +57,8 @@ COPY --from=builder /app/target/release/trader-tony-v4 /app/trader-tony-v4
 # Expose the API port (Railway will set PORT env var)
 EXPOSE 3030
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-3030}/api/health || exit 1
+# Note: Railway uses its own health check (healthcheckPath in railway.toml)
+# Docker HEALTHCHECK removed as it requires curl which isn't in slim image
 
 # Default environment variables
 ENV RUST_LOG=info
