@@ -20,8 +20,8 @@ const API = {
             // Development - connect to local Rust server
             this.baseUrl = 'http://127.0.0.1:3030';
         } else {
-             // Production - use relative URLs (Vercel rewrites handle proxying)
-            this.baseUrl = '';
+            // Production - use Railway backend directly (Vercel can't proxy reliably)
+            this.baseUrl = window.API_BASE_URL || 'https://trader-tony.up.railway.app';
         }
 
         console.log(`[API] Initialized with base URL: ${this.baseUrl}`);

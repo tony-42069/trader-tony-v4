@@ -43,9 +43,8 @@ const WebSocketClient = {
         } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
             this.url = 'ws://127.0.0.1:3030/ws';
         } else {
-            // Production - use secure WebSocket on same host
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            this.url = window.WS_URL || `${protocol}//${window.location.host}/ws`;
+            // Production - use Railway backend directly (Vercel can't proxy WebSocket)
+            this.url = window.WS_URL || 'wss://trader-tony.up.railway.app/ws';
         }
 
         console.log(`[WebSocket] Initialized with URL: ${this.url}`);

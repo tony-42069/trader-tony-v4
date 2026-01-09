@@ -3,11 +3,11 @@
  * Environment-specific settings
  */
 
-// API Base URL - Update this for production
-window.API_BASE_URL = window.API_BASE_URL || '';
+// API Base URL - Railway backend
+window.API_BASE_URL = window.API_BASE_URL || 'https://trader-tony.up.railway.app';
 
-// WebSocket URL - Update this for production
-window.WS_URL = window.WS_URL || '';
+// WebSocket URL - Railway backend
+window.WS_URL = window.WS_URL || 'wss://trader-tony.up.railway.app/ws';
 
 // Feature flags
 window.FEATURES = {
