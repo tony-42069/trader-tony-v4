@@ -8,6 +8,7 @@ pub mod routes;
 pub mod handlers;
 pub mod websocket;
 pub mod models;
+pub mod copy_trade;
 
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
@@ -17,6 +18,7 @@ use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
 use crate::trading::autotrader::AutoTrader;
 
+use self::copy_trade::CopyTradeManager;
 use self::websocket::WsMessage;
 
 /// Shared application state for all API handlers
@@ -32,6 +34,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Broadcast channel for WebSocket messages
     pub ws_tx: broadcast::Sender<WsMessage>,
+    /// Copy trade manager for handling copy trading functionality
+    pub copy_trade_manager: Arc<CopyTradeManager>,
 }
 
 impl AppState {
@@ -45,13 +49,23 @@ impl AppState {
         // Create broadcast channel for WebSocket messages (capacity of 100 messages)
         let (ws_tx, _) = broadcast::channel(100);
 
+        // Create copy trade manager
+        let copy_trade_manager = Arc::new(CopyTradeManager::new(config.clone()));
+
         Self {
             auto_trader,
             wallet_manager,
             solana_client,
             config,
             ws_tx,
+            copy_trade_manager,
         }
+    }
+
+    /// Initialize async components (call after creation)
+    pub async fn init(&self) -> anyhow::Result<()> {
+        self.copy_trade_manager.init().await?;
+        Ok(())
     }
 
     /// Get a new receiver for WebSocket messages

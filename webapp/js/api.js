@@ -114,6 +114,26 @@ const API = {
         });
     },
 
+    /**
+     * PUT request helper
+     */
+    async put(endpoint, data = {}) {
+        return this.request(endpoint, {
+            method: 'PUT',
+            body: JSON.stringify(data),
+        });
+    },
+
+    /**
+     * DELETE request helper
+     */
+    async delete(endpoint, data = {}) {
+        return this.request(endpoint, {
+            method: 'DELETE',
+            body: JSON.stringify(data),
+        });
+    },
+
     // ==========================================
     // Health & Status Endpoints
     // ==========================================
@@ -218,30 +238,85 @@ const API = {
     // ==========================================
 
     /**
-     * Get copy trade settings
+     * Get trade signals (recent)
      */
-    async getCopyTradeSettings() {
-        return this.get('/api/copytrade/settings');
+    async getSignals() {
+        return this.get('/api/signals');
     },
 
     /**
-     * Update copy trade settings
-     * @param {object} settings - Copy trade settings
+     * Get active signals (bot's current open positions)
      */
-    async updateCopyTradeSettings(settings) {
-        return this.post('/api/copytrade/settings', settings);
+    async getActiveSignals() {
+        return this.get('/api/signals/active');
     },
 
     /**
      * Register wallet for copy trading
      * @param {string} walletAddress - User's wallet address
      * @param {string} signature - Signed message for verification
+     * @param {string} message - Original signed message
      */
-    async registerCopyTrader(walletAddress, signature) {
-        return this.post('/api/copytrade/register', {
+    async registerCopyTrader(walletAddress, signature, message) {
+        return this.post('/api/copy/register', {
             wallet_address: walletAddress,
             signature,
+            message,
         });
+    },
+
+    /**
+     * Unregister from copy trading
+     * @param {string} walletAddress - User's wallet address
+     */
+    async unregisterCopyTrader(walletAddress) {
+        return this.delete('/api/copy/register', {
+            wallet_address: walletAddress,
+        });
+    },
+
+    /**
+     * Get copy trade status for a wallet
+     * @param {string} walletAddress - User's wallet address
+     */
+    async getCopyTradeStatus(walletAddress) {
+        return this.get(`/api/copy/status?wallet=${walletAddress}`);
+    },
+
+    /**
+     * Update copy trade settings
+     * @param {string} walletAddress - User's wallet address
+     * @param {object} settings - Copy trade settings
+     */
+    async updateCopyTradeSettings(walletAddress, settings) {
+        return this.put(`/api/copy/settings?wallet=${walletAddress}`, settings);
+    },
+
+    /**
+     * Get copy positions for a wallet
+     * @param {string} walletAddress - User's wallet address
+     * @param {string} status - Optional status filter (open/closed)
+     */
+    async getCopyPositions(walletAddress, status = null) {
+        let url = `/api/copy/positions?wallet=${walletAddress}`;
+        if (status) url += `&status=${status}`;
+        return this.get(url);
+    },
+
+    /**
+     * Get copy trade statistics for a wallet
+     * @param {string} walletAddress - User's wallet address
+     */
+    async getCopyTradeStats(walletAddress) {
+        return this.get(`/api/copy/stats?wallet=${walletAddress}`);
+    },
+
+    /**
+     * Build a copy trade transaction
+     * @param {object} params - Transaction parameters
+     */
+    async buildCopyTransaction(params) {
+        return this.post('/api/copy/build-tx', params);
     },
 
     // ==========================================
@@ -439,6 +514,142 @@ const API = {
                 is_honeypot: false,
                 top_holder_percent: 12.5,
                 recommendation: 'Moderate risk. Good liquidity and holder distribution. Proceed with caution.',
+            };
+        }
+
+        // Copy trade signals
+        if (endpoint === '/api/signals') {
+            return {
+                signals: [
+                    {
+                        id: 'sig_001',
+                        token_address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+                        token_symbol: 'BONK',
+                        token_name: 'Bonk',
+                        action: 'buy',
+                        amount_sol: 0.5,
+                        price_sol: 0.0000234,
+                        timestamp: new Date(Date.now() - 3600000).toISOString(),
+                        bot_position_id: 'pos_001',
+                        is_active: true,
+                        current_price_sol: 0.0000312,
+                        current_pnl_percent: 33.4,
+                    },
+                    {
+                        id: 'sig_002',
+                        token_address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
+                        token_symbol: 'WIF',
+                        token_name: 'dogwifhat',
+                        action: 'buy',
+                        amount_sol: 1.0,
+                        price_sol: 0.0145,
+                        timestamp: new Date(Date.now() - 7200000).toISOString(),
+                        bot_position_id: 'pos_002',
+                        is_active: true,
+                        current_price_sol: 0.0132,
+                        current_pnl_percent: -9.0,
+                    },
+                ],
+                total: 2,
+            };
+        }
+
+        // Active signals
+        if (endpoint === '/api/signals/active') {
+            return {
+                signals: [
+                    {
+                        id: 'sig_001',
+                        token_address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+                        token_symbol: 'BONK',
+                        token_name: 'Bonk',
+                        action: 'buy',
+                        amount_sol: 0.5,
+                        price_sol: 0.0000234,
+                        timestamp: new Date(Date.now() - 3600000).toISOString(),
+                        bot_position_id: 'pos_001',
+                        is_active: true,
+                        current_price_sol: 0.0000312,
+                        current_pnl_percent: 33.4,
+                    },
+                ],
+                total: 1,
+            };
+        }
+
+        // Copy trade status
+        if (endpoint.startsWith('/api/copy/status')) {
+            return {
+                is_registered: true,
+                wallet_address: 'DemoUserWallet123...',
+                auto_copy_enabled: false,
+                copy_amount_sol: 0.1,
+                max_positions: 5,
+                slippage_bps: 300,
+                total_copy_trades: 12,
+                active_copy_positions: 1,
+                total_fees_paid_sol: 0.05,
+            };
+        }
+
+        // Copy trade stats
+        if (endpoint.startsWith('/api/copy/stats')) {
+            return {
+                total_trades: 12,
+                winning_trades: 8,
+                losing_trades: 4,
+                win_rate: 66.67,
+                total_pnl_sol: 0.85,
+                total_fees_paid_sol: 0.05,
+                avg_pnl_percent: 15.2,
+                best_trade_pnl_sol: 0.45,
+                worst_trade_pnl_sol: -0.12,
+            };
+        }
+
+        // Copy positions
+        if (endpoint.startsWith('/api/copy/positions')) {
+            return {
+                positions: [
+                    {
+                        id: 'cpos_001',
+                        copier_wallet: 'DemoUserWallet123...',
+                        token_address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+                        token_symbol: 'BONK',
+                        entry_price_sol: 0.0000234,
+                        entry_amount_sol: 0.1,
+                        token_amount: 4273504,
+                        bot_position_id: 'pos_001',
+                        status: 'open',
+                        current_price_sol: 0.0000312,
+                        current_pnl_percent: 33.4,
+                        pnl_sol: null,
+                        fee_paid_sol: null,
+                        opened_at: new Date(Date.now() - 3500000).toISOString(),
+                        closed_at: null,
+                    },
+                ],
+                total: 1,
+            };
+        }
+
+        // Copy trade registration
+        if (endpoint === '/api/copy/register') {
+            return {
+                success: true,
+                message: 'Wallet registered for copy trading',
+            };
+        }
+
+        // Build copy transaction
+        if (endpoint === '/api/copy/build-tx') {
+            return {
+                success: true,
+                transaction: 'MOCK_TRANSACTION_BASE64_STRING',
+                error: null,
+                estimated_output: 4273504,
+                estimated_fee: null,
+                estimated_pnl: null,
             };
         }
 

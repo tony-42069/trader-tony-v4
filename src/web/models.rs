@@ -213,3 +213,131 @@ pub struct ErrorResponse {
     pub error: String,
     pub details: Option<String>,
 }
+
+// ============================================================================
+// Copy Trade
+// ============================================================================
+
+/// Response for trade signals endpoint
+#[derive(Debug, Serialize)]
+pub struct SignalResponse {
+    pub id: String,
+    pub token_address: String,
+    pub token_symbol: String,
+    pub token_name: String,
+    pub action: String,
+    pub amount_sol: f64,
+    pub price_sol: f64,
+    pub timestamp: DateTime<Utc>,
+    pub bot_position_id: String,
+    pub is_active: bool,
+    pub current_price_sol: Option<f64>,
+    pub current_pnl_percent: Option<f64>,
+}
+
+/// Response for signals list
+#[derive(Debug, Serialize)]
+pub struct SignalsListResponse {
+    pub signals: Vec<SignalResponse>,
+    pub total: usize,
+}
+
+/// Request to register for copy trading
+#[derive(Debug, Deserialize)]
+pub struct CopyTradeRegisterRequest {
+    pub wallet_address: String,
+    pub signature: String,
+    pub message: String,
+}
+
+/// Request to update copy trade settings
+#[derive(Debug, Deserialize)]
+pub struct CopyTradeSettingsRequest {
+    pub auto_copy_enabled: Option<bool>,
+    pub copy_amount_sol: Option<f64>,
+    pub max_positions: Option<u32>,
+    pub slippage_bps: Option<u32>,
+}
+
+/// Response for copy trade status
+#[derive(Debug, Serialize)]
+pub struct CopyTradeStatusResponse {
+    pub is_registered: bool,
+    pub wallet_address: Option<String>,
+    pub auto_copy_enabled: bool,
+    pub copy_amount_sol: f64,
+    pub max_positions: u32,
+    pub slippage_bps: u32,
+    pub total_copy_trades: u32,
+    pub active_copy_positions: usize,
+    pub total_fees_paid_sol: f64,
+}
+
+/// Request to build a copy trade transaction
+#[derive(Debug, Deserialize)]
+pub struct BuildCopyTxRequest {
+    pub user_wallet: String,
+    pub signal_id: String,
+    pub amount_sol: Option<f64>,
+    pub copy_position_id: Option<String>,
+    pub slippage_bps: Option<u32>,
+}
+
+/// Response with built transaction
+#[derive(Debug, Serialize)]
+pub struct BuildCopyTxResponse {
+    pub success: bool,
+    pub transaction: Option<String>,
+    pub error: Option<String>,
+    pub estimated_output: Option<f64>,
+    pub estimated_fee: Option<f64>,
+    pub estimated_pnl: Option<f64>,
+}
+
+/// Response for copy position
+#[derive(Debug, Serialize)]
+pub struct CopyPositionResponse {
+    pub id: String,
+    pub copier_wallet: String,
+    pub token_address: String,
+    pub token_symbol: String,
+    pub entry_price_sol: f64,
+    pub entry_amount_sol: f64,
+    pub token_amount: f64,
+    pub bot_position_id: String,
+    pub status: String,
+    pub current_price_sol: Option<f64>,
+    pub current_pnl_percent: Option<f64>,
+    pub pnl_sol: Option<f64>,
+    pub fee_paid_sol: Option<f64>,
+    pub opened_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
+}
+
+/// Response for copy positions list
+#[derive(Debug, Serialize)]
+pub struct CopyPositionsListResponse {
+    pub positions: Vec<CopyPositionResponse>,
+    pub total: usize,
+}
+
+/// Query params for copy positions
+#[derive(Debug, Deserialize)]
+pub struct CopyPositionsQuery {
+    pub wallet: String,
+    pub status: Option<String>,
+}
+
+/// Response for copy trade stats
+#[derive(Debug, Serialize)]
+pub struct CopyTradeStatsResponse {
+    pub total_trades: u32,
+    pub winning_trades: u32,
+    pub losing_trades: u32,
+    pub win_rate: f64,
+    pub total_pnl_sol: f64,
+    pub total_fees_paid_sol: f64,
+    pub avg_pnl_percent: f64,
+    pub best_trade_pnl_sol: f64,
+    pub worst_trade_pnl_sol: f64,
+}

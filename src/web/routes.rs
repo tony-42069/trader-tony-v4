@@ -44,6 +44,25 @@ pub fn create_routes(state: AppState) -> Router {
         // Token analysis
         .route("/api/analyze", post(handlers::analyze_token))
 
+        // Copy Trade - Signals
+        .route("/api/signals", get(handlers::get_signals))
+        .route("/api/signals/active", get(handlers::get_active_signals))
+
+        // Copy Trade - Registration
+        .route("/api/copy/register", post(handlers::register_copy_trader))
+        .route("/api/copy/register", delete(handlers::unregister_copy_trader))
+
+        // Copy Trade - Status & Settings
+        .route("/api/copy/status", get(handlers::get_copy_trade_status))
+        .route("/api/copy/settings", put(handlers::update_copy_trade_settings))
+
+        // Copy Trade - Positions
+        .route("/api/copy/positions", get(handlers::get_copy_positions))
+        .route("/api/copy/stats", get(handlers::get_copy_trade_stats))
+
+        // Copy Trade - Transaction Builder
+        .route("/api/copy/build-tx", post(handlers::build_copy_transaction))
+
         // WebSocket
         .route("/ws", get(ws_handler))
 
