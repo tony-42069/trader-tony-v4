@@ -37,8 +37,12 @@ async fn main() -> Result<()> {
 
     // Initialize Solana client
     let solana_client = Arc::new(SolanaClient::new(&config.solana_rpc_url)?);
-    solana_client.check_connection().await?;
-    info!("Solana client initialized successfully");
+    // Don't block startup on RPC connection check - just log warning if it fails
+    match solana_client.check_connection().await {
+        Ok(_) => info!("Solana RPC connection verified"),
+        Err(e) => tracing::warn!("Solana RPC connection check failed (will retry later): {}", e),
+    }
+    info!("Solana client initialized");
 
     // Initialize wallet manager
     let wallet_manager = WalletManager::new(
