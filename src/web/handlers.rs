@@ -6,11 +6,12 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::models::*;
 use super::websocket::WsMessage;
 use super::AppState;
+use crate::models::copy_trade::CopyTradeSettings;
 use crate::trading::strategy::Strategy;
 
 // ============================================================================
@@ -648,5 +649,424 @@ pub async fn analyze_token(
                 }),
             ))
         }
+    }
+}
+
+// ============================================================================
+// Copy Trade - Signals
+// ============================================================================
+
+/// Get all trade signals (recent)
+pub async fn get_signals(
+    State(state): State<AppState>,
+) -> Result<Json<SignalsListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let signals = state.copy_trade_manager.get_recent_signals(100).await;
+
+    let signal_responses: Vec<SignalResponse> = signals
+        .iter()
+        .map(|s| SignalResponse {
+            id: s.id.clone(),
+            token_address: s.token_address.clone(),
+            token_symbol: s.token_symbol.clone(),
+            token_name: s.token_name.clone(),
+            action: format!("{}", s.action),
+            amount_sol: s.amount_sol,
+            price_sol: s.price_sol,
+            timestamp: s.timestamp,
+            bot_position_id: s.bot_position_id.clone(),
+            is_active: s.is_active,
+            current_price_sol: s.current_price_sol,
+            current_pnl_percent: s.current_pnl_percent,
+        })
+        .collect();
+
+    let total = signal_responses.len();
+
+    Ok(Json(SignalsListResponse {
+        signals: signal_responses,
+        total,
+    }))
+}
+
+/// Get active signals (bot's current open positions)
+pub async fn get_active_signals(
+    State(state): State<AppState>,
+) -> Result<Json<SignalsListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let signals = state.copy_trade_manager.get_active_signals().await;
+
+    let signal_responses: Vec<SignalResponse> = signals
+        .iter()
+        .map(|s| SignalResponse {
+            id: s.id.clone(),
+            token_address: s.token_address.clone(),
+            token_symbol: s.token_symbol.clone(),
+            token_name: s.token_name.clone(),
+            action: format!("{}", s.action),
+            amount_sol: s.amount_sol,
+            price_sol: s.price_sol,
+            timestamp: s.timestamp,
+            bot_position_id: s.bot_position_id.clone(),
+            is_active: s.is_active,
+            current_price_sol: s.current_price_sol,
+            current_pnl_percent: s.current_pnl_percent,
+        })
+        .collect();
+
+    let total = signal_responses.len();
+
+    Ok(Json(SignalsListResponse {
+        signals: signal_responses,
+        total,
+    }))
+}
+
+// ============================================================================
+// Copy Trade - Registration
+// ============================================================================
+
+/// Register a wallet for copy trading
+pub async fn register_copy_trader(
+    State(state): State<AppState>,
+    Json(req): Json<CopyTradeRegisterRequest>,
+) -> Result<Json<SuccessResponse>, (StatusCode, Json<ErrorResponse>)> {
+    match state
+        .copy_trade_manager
+        .register_trader(&req.wallet_address, &req.signature, &req.message)
+        .await
+    {
+        Ok(_) => {
+            info!("Registered copy trader: {}", req.wallet_address);
+            Ok(Json(SuccessResponse {
+                success: true,
+                message: format!("Wallet {} registered for copy trading", req.wallet_address),
+            }))
+        }
+        Err(e) => {
+            warn!("Failed to register copy trader: {}", e);
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Failed to register".to_string(),
+                    details: Some(e.to_string()),
+                }),
+            ))
+        }
+    }
+}
+
+/// Unregister a wallet from copy trading
+pub async fn unregister_copy_trader(
+    State(state): State<AppState>,
+    Json(req): Json<CopyTradeRegisterRequest>,
+) -> Result<Json<SuccessResponse>, (StatusCode, Json<ErrorResponse>)> {
+    match state
+        .copy_trade_manager
+        .unregister_trader(&req.wallet_address)
+        .await
+    {
+        Ok(_) => {
+            info!("Unregistered copy trader: {}", req.wallet_address);
+            Ok(Json(SuccessResponse {
+                success: true,
+                message: format!("Wallet {} unregistered from copy trading", req.wallet_address),
+            }))
+        }
+        Err(e) => {
+            warn!("Failed to unregister copy trader: {}", e);
+            Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Failed to unregister".to_string(),
+                    details: Some(e.to_string()),
+                }),
+            ))
+        }
+    }
+}
+
+// ============================================================================
+// Copy Trade - Status & Settings
+// ============================================================================
+
+/// Get copy trade status for a wallet
+pub async fn get_copy_trade_status(
+    State(state): State<AppState>,
+    Query(query): Query<CopyPositionsQuery>,
+) -> Result<Json<CopyTradeStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let trader = state.copy_trade_manager.get_trader(&query.wallet).await;
+    let active_positions = state
+        .copy_trade_manager
+        .get_active_copy_positions(&query.wallet)
+        .await;
+
+    match trader {
+        Some(t) => Ok(Json(CopyTradeStatusResponse {
+            is_registered: true,
+            wallet_address: Some(t.wallet_address),
+            auto_copy_enabled: t.auto_copy_enabled,
+            copy_amount_sol: t.copy_amount_sol,
+            max_positions: t.max_positions,
+            slippage_bps: t.slippage_bps,
+            total_copy_trades: t.total_copy_trades,
+            active_copy_positions: active_positions.len(),
+            total_fees_paid_sol: t.total_fees_paid_sol,
+        })),
+        None => Ok(Json(CopyTradeStatusResponse {
+            is_registered: false,
+            wallet_address: None,
+            auto_copy_enabled: false,
+            copy_amount_sol: 0.1,
+            max_positions: 5,
+            slippage_bps: 300,
+            total_copy_trades: 0,
+            active_copy_positions: 0,
+            total_fees_paid_sol: 0.0,
+        })),
+    }
+}
+
+/// Update copy trade settings
+pub async fn update_copy_trade_settings(
+    State(state): State<AppState>,
+    Query(query): Query<CopyPositionsQuery>,
+    Json(req): Json<CopyTradeSettingsRequest>,
+) -> Result<Json<SuccessResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Get existing settings
+    let trader = match state.copy_trade_manager.get_trader(&query.wallet).await {
+        Some(t) => t,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Wallet not registered".to_string(),
+                    details: None,
+                }),
+            ));
+        }
+    };
+
+    let settings = CopyTradeSettings {
+        auto_copy_enabled: req.auto_copy_enabled.unwrap_or(trader.auto_copy_enabled),
+        copy_amount_sol: req.copy_amount_sol.unwrap_or(trader.copy_amount_sol),
+        max_positions: req.max_positions.unwrap_or(trader.max_positions),
+        slippage_bps: req.slippage_bps.unwrap_or(trader.slippage_bps),
+    };
+
+    match state
+        .copy_trade_manager
+        .update_settings(&query.wallet, settings)
+        .await
+    {
+        Ok(_) => {
+            info!("Updated copy trade settings for: {}", query.wallet);
+            Ok(Json(SuccessResponse {
+                success: true,
+                message: "Settings updated".to_string(),
+            }))
+        }
+        Err(e) => {
+            error!("Failed to update settings: {}", e);
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Failed to update settings".to_string(),
+                    details: Some(e.to_string()),
+                }),
+            ))
+        }
+    }
+}
+
+// ============================================================================
+// Copy Trade - Positions
+// ============================================================================
+
+/// Get copy positions for a wallet
+pub async fn get_copy_positions(
+    State(state): State<AppState>,
+    Query(query): Query<CopyPositionsQuery>,
+) -> Result<Json<CopyPositionsListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let positions = state
+        .copy_trade_manager
+        .get_copy_positions(&query.wallet)
+        .await;
+
+    // Filter by status if provided
+    let filtered_positions: Vec<_> = match query.status.as_deref() {
+        Some("open") => positions
+            .into_iter()
+            .filter(|p| p.status == crate::models::copy_trade::CopyPositionStatus::Open)
+            .collect(),
+        Some("closed") => positions
+            .into_iter()
+            .filter(|p| p.status == crate::models::copy_trade::CopyPositionStatus::Closed)
+            .collect(),
+        _ => positions,
+    };
+
+    let position_responses: Vec<CopyPositionResponse> = filtered_positions
+        .iter()
+        .map(|p| CopyPositionResponse {
+            id: p.id.clone(),
+            copier_wallet: p.copier_wallet.clone(),
+            token_address: p.token_address.clone(),
+            token_symbol: p.token_symbol.clone(),
+            entry_price_sol: p.entry_price_sol,
+            entry_amount_sol: p.entry_amount_sol,
+            token_amount: p.token_amount,
+            bot_position_id: p.bot_position_id.clone(),
+            status: format!("{}", p.status),
+            current_price_sol: None, // TODO: Fetch current price
+            current_pnl_percent: None, // TODO: Calculate current PnL
+            pnl_sol: p.pnl_sol,
+            fee_paid_sol: p.fee_paid_sol,
+            opened_at: p.opened_at,
+            closed_at: p.closed_at,
+        })
+        .collect();
+
+    let total = position_responses.len();
+
+    Ok(Json(CopyPositionsListResponse {
+        positions: position_responses,
+        total,
+    }))
+}
+
+/// Get copy trade statistics for a wallet
+pub async fn get_copy_trade_stats(
+    State(state): State<AppState>,
+    Query(query): Query<CopyPositionsQuery>,
+) -> Result<Json<CopyTradeStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let stats = state
+        .copy_trade_manager
+        .get_trader_stats(&query.wallet)
+        .await;
+
+    Ok(Json(CopyTradeStatsResponse {
+        total_trades: stats.total_trades,
+        winning_trades: stats.winning_trades,
+        losing_trades: stats.losing_trades,
+        win_rate: stats.win_rate,
+        total_pnl_sol: stats.total_pnl_sol,
+        total_fees_paid_sol: stats.total_fees_paid_sol,
+        avg_pnl_percent: stats.avg_pnl_percent,
+        best_trade_pnl_sol: stats.best_trade_pnl_sol,
+        worst_trade_pnl_sol: stats.worst_trade_pnl_sol,
+    }))
+}
+
+// ============================================================================
+// Copy Trade - Transaction Builder
+// ============================================================================
+
+/// Build a copy trade transaction for the user to sign
+pub async fn build_copy_transaction(
+    State(state): State<AppState>,
+    Json(req): Json<BuildCopyTxRequest>,
+) -> Result<Json<BuildCopyTxResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Get the signal
+    let signal = match state.copy_trade_manager.get_signal(&req.signal_id).await {
+        Some(s) => s,
+        None => {
+            return Ok(Json(BuildCopyTxResponse {
+                success: false,
+                transaction: None,
+                error: Some("Signal not found".to_string()),
+                estimated_output: None,
+                estimated_fee: None,
+                estimated_pnl: None,
+            }));
+        }
+    };
+
+    // For BUY signals
+    if signal.action == crate::models::copy_trade::TradeAction::Buy {
+        let amount_sol = req.amount_sol.unwrap_or(0.1);
+
+        // TODO: Build actual Jupiter swap transaction
+        // For now, return a placeholder response
+        info!(
+            "Building copy BUY tx for {} - {} SOL for {}",
+            req.user_wallet, amount_sol, signal.token_symbol
+        );
+
+        // In production, this would:
+        // 1. Get Jupiter quote
+        // 2. Build swap transaction
+        // 3. Return serialized transaction
+
+        Ok(Json(BuildCopyTxResponse {
+            success: true,
+            transaction: Some("PLACEHOLDER_TX_BASE64".to_string()), // TODO: Real transaction
+            error: None,
+            estimated_output: Some(amount_sol / signal.price_sol), // Estimated token amount
+            estimated_fee: None,
+            estimated_pnl: None,
+        }))
+    }
+    // For SELL signals
+    else {
+        // Get the copy position to sell
+        let copy_position_id = match req.copy_position_id {
+            Some(id) => id,
+            None => {
+                return Ok(Json(BuildCopyTxResponse {
+                    success: false,
+                    transaction: None,
+                    error: Some("copy_position_id required for sell".to_string()),
+                    estimated_output: None,
+                    estimated_fee: None,
+                    estimated_pnl: None,
+                }));
+            }
+        };
+
+        // Find the copy position
+        let positions = state
+            .copy_trade_manager
+            .get_copy_positions(&req.user_wallet)
+            .await;
+
+        let copy_position = match positions.iter().find(|p| p.id == copy_position_id) {
+            Some(p) => p,
+            None => {
+                return Ok(Json(BuildCopyTxResponse {
+                    success: false,
+                    transaction: None,
+                    error: Some("Copy position not found".to_string()),
+                    estimated_output: None,
+                    estimated_fee: None,
+                    estimated_pnl: None,
+                }));
+            }
+        };
+
+        // Calculate estimated values
+        let exit_value = copy_position.token_amount * signal.price_sol;
+        let pnl = exit_value - copy_position.entry_amount_sol;
+        let fee = state
+            .copy_trade_manager
+            .calculate_fee(copy_position.entry_amount_sol, exit_value);
+
+        info!(
+            "Building copy SELL tx for {} - {} {} (est PnL: {} SOL, fee: {} SOL)",
+            req.user_wallet,
+            copy_position.token_amount,
+            signal.token_symbol,
+            pnl,
+            fee
+        );
+
+        // TODO: Build actual Jupiter swap transaction with fee transfer
+
+        Ok(Json(BuildCopyTxResponse {
+            success: true,
+            transaction: Some("PLACEHOLDER_TX_BASE64".to_string()), // TODO: Real transaction
+            error: None,
+            estimated_output: Some(exit_value - fee),
+            estimated_fee: Some(fee),
+            estimated_pnl: Some(pnl - fee),
+        }))
     }
 }

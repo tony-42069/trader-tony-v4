@@ -76,6 +76,10 @@ async fn main() -> Result<()> {
         config.clone(),
     );
 
+    // Initialize async components (copy trade manager, etc.)
+    app_state.init().await.context("Failed to initialize app state")?;
+    info!("Copy trade manager initialized");
+
     // Start the web server
     info!("Starting TraderTony V4 API server...");
     web::server::start_server(app_state, config).await?;
