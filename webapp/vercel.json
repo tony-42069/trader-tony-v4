@@ -49,19 +49,11 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://your-backend-url.railway.app/api/:path*"
+      "destination": "https://trader-tony.up.railway.app/api/:path*"
     },
     {
       "source": "/ws",
-      "destination": "wss://your-backend-url.railway.app/ws"
+      "destination": "wss://trader-tony.up.railway.app/ws"
     }
-  ],
-  "env": {
-    "API_BASE_URL": "@api_base_url"
-  },
-  "build": {
-    "env": {
-      "API_BASE_URL": "@api_base_url"
-    }
-  }
+  ]
 }

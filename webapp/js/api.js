@@ -20,8 +20,8 @@ const API = {
             // Development - connect to local Rust server
             this.baseUrl = 'http://127.0.0.1:3030';
         } else {
-            // Production - use environment variable or same origin
-            this.baseUrl = window.API_BASE_URL || '';
+             // Production - use relative URLs (Vercel rewrites handle proxying)
+            this.baseUrl = '';
         }
 
         console.log(`[API] Initialized with base URL: ${this.baseUrl}`);
