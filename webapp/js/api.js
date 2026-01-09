@@ -17,8 +17,8 @@ const API = {
         if (baseUrl) {
             this.baseUrl = baseUrl;
         } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-            // Development - connect to local Rust server
-            this.baseUrl = 'http://127.0.0.1:3030';
+            // Development - connect to local Rust server (default port 3000)
+            this.baseUrl = 'http://127.0.0.1:3000';
         } else {
             // Production - use Railway backend directly (Vercel can't proxy reliably)
             this.baseUrl = window.API_BASE_URL || 'https://trader-tony.up.railway.app';

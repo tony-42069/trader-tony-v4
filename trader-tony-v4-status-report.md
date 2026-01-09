@@ -1,340 +1,290 @@
-# TraderTony V4 - Comprehensive Project Status Report
-## Generated: January 7, 2026
+# TraderTony V4 - Status Report
+
+## Generated: January 9, 2026
+
+## Project Status: DEPLOYMENT COMPLETE - Ready for Testing
 
 ---
 
 ## Executive Summary
 
-**Project Status: ~90% Complete - Ready for Compilation Testing**
-
-TraderTony V4 is a sophisticated autonomous trading bot for Solana memecoins, built in Rust. The codebase is substantially complete with all major components implemented. The primary remaining work involves:
-1. Verifying successful compilation (`cargo build`)
-2. Testing in demo mode
-3. Addressing minor refinements
+TraderTony V4 has been successfully migrated from a Telegram bot to a full-stack web application with:
+- **Backend**: Rust/Axum REST API deployed on Railway
+- **Frontend**: Cyberpunk-themed dashboard deployed on Vercel
+- **Copy Trading**: Infrastructure complete, ready for activation
 
 ---
 
-## Architecture Overview
+## Completed Phases
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    TELEGRAM BOT INTERFACE                   │
-│   Commands: /start /balance /autotrader /strategy           │
-│             /positions /analyze /snipe                       │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-┌─────────────────────────▼───────────────────────────────────┐
-│                      AUTO TRADER                             │
-│  • Token Discovery (Helius DAS API)                          │
-│  • Risk Analysis Integration                                 │
-│  • Strategy Management                                       │
-│  • Trade Execution via Jupiter                               │
-└───────┬─────────────────┬─────────────────┬─────────────────┘
-        │                 │                 │
-┌───────▼───────┐ ┌───────▼───────┐ ┌───────▼───────┐
-│ RISK ANALYZER │ │POSITION MGR   │ │ JUPITER API   │
-│ • Liquidity   │ │ • SL/TP/Trail │ │ • Quotes      │
-│ • Honeypot    │ │ • Max Hold    │ │ • Swaps       │
-│ • Authorities │ │ • Price Track │ │ • Price Data  │
-│ • Tax Check   │ │ • Persistence │ │               │
-└───────────────┘ └───────────────┘ └───────────────┘
-        │                 │                 │
-┌───────▼─────────────────▼─────────────────▼─────────────────┐
-│                    SOLANA INTEGRATION                        │
-│  • RPC Client with Retry Logic                               │
-│  • Wallet Manager (Transaction Signing)                      │
-│  • Transaction Confirmation                                  │
-└─────────────────────────────────────────────────────────────┘
-```
+### Phase 1: REST API Migration
+- Removed Telegram bot (`src/bot/` directory deleted)
+- Created Axum web server with full REST API
+- Implemented 20+ API endpoints
+- Added WebSocket support for real-time updates
+
+### Phase 2: Web Dashboard
+- Built responsive HTML/CSS/JS frontend
+- Real-time stats display
+- Position and trade tables
+- AutoTrader controls
+- Token analysis interface
+- Wallet connection UI (Phantom/Solflare ready)
+
+### Phase 3: Copy Trade System
+- Created data models (`src/models/copy_trade.rs`)
+- Implemented CopyTradeManager (`src/web/copy_trade.rs`)
+- Added 11 copy trade API endpoints
+- JSON persistence for traders, signals, positions
+- 10% profit fee calculation system
+
+### Phase 4: Deployment Configuration
+- Railway configuration (`railway.toml`, `Dockerfile`)
+- Vercel configuration (`webapp/vercel.json`)
+- GitHub Actions CI pipeline
+- Comprehensive deployment documentation
 
 ---
 
-## Component Status
+## Recent Session Accomplishments
 
-### ✅ COMPLETE - Core Infrastructure
+### Backend Deployment (Railway) - COMPLETE
+- Fixed Rust version (1.75 → 1.83) for Cargo.lock v4 support
+- Fixed binary path in railway.toml
+- Made startup resilient (non-blocking RPC check)
+- Resolved private key format issues
+- **Status**: Live at `https://trader-tony.up.railway.app`
 
-| Component | File | Status | Notes |
-|-----------|------|--------|-------|
-| Configuration | `src/config.rs` | ✅ Complete | Loads from .env, all parameters defined |
-| Error Handling | `src/error.rs` | ✅ Complete | Custom error types via thiserror |
-| Main Entry | `src/main.rs` | ✅ Complete | Initializes all components, starts bot |
-| Token Models | `src/models/token.rs` | ✅ Complete | TokenMetadata struct |
+### Frontend Deployment (Vercel) - COMPLETE
+- Fixed API connectivity (direct calls to Railway instead of proxy)
+- Updated `config.js`, `api.js`, `websocket.js` with Railway URLs
+- Removed unreliable Vercel rewrites
+- **Status**: Live at `https://trader-tony.vercel.app`
 
-### ✅ COMPLETE - Solana Integration
+### Cyberpunk UI Overhaul - COMPLETE
+- New dark theme with neon accents (cyan, green, red, amber)
+- Glass morphism header with backdrop blur
+- HUD-style stat cards with scanning animations
+- Holographic buttons with sweep effects
+- Terminal-style tables
+- Pulsing status indicators
+- **CSS renamed**: `styles.css` → `terminal.css` (cache busting)
 
-| Component | File | Status | Notes |
-|-----------|------|--------|-------|
-| RPC Client | `src/solana/client.rs` | ✅ Complete | Full retry logic, transaction confirmation |
-| Wallet Manager | `src/solana/wallet.rs` | ✅ Complete | VersionedTransaction signing implemented |
-
-**Key Features:**
-- Exponential backoff retry for RPC calls
-- Transaction confirmation with timeout
-- Support for both legacy and versioned transactions
-- Demo mode simulation
-
-### ✅ COMPLETE - API Integrations
-
-| API | File | Status | Notes |
-|-----|------|--------|-------|
-| Jupiter | `src/api/jupiter.rs` | ✅ Complete | Quotes, swaps, price fetching |
-| Helius | `src/api/helius.rs` | ✅ Complete | DAS API for token discovery |
-| Birdeye | `src/api/birdeye.rs` | ✅ Complete | Token overview, SOL price |
-
-**Jupiter Features:**
-- SOL → Token swaps
-- Token → SOL swaps
-- Quote retrieval with slippage
-- Actual amount extraction from transaction logs
-
-### ✅ COMPLETE - Trading System
-
-| Component | File | Status | Notes |
-|-----------|------|--------|-------|
-| AutoTrader | `src/trading/autotrader.rs` | ✅ Complete | Background scanning, trade execution |
-| Position Manager | `src/trading/position.rs` | ✅ Complete | Full lifecycle management |
-| Risk Analyzer | `src/trading/risk.rs` | ✅ Complete | Multi-factor risk scoring |
-| Strategy | `src/trading/strategy.rs` | ✅ Complete | Presets, persistence |
-
-**AutoTrader Features:**
-- Background token scanning (60-second intervals)
-- Real mode: Helius discovery → Risk analysis → Strategy matching → Execute
-- Demo mode: Simulated token finding and trading
-- Strategy management (add/update/delete/toggle)
-- Manual buy execution support
-- Performance statistics tracking
-
-**Position Manager Features:**
-- Position lifecycle: Active → Closing → Closed/Failed
-- Exit conditions: Stop Loss, Take Profit, Trailing Stop, Max Hold Time
-- Real-time price fetching
-- Background monitoring (15-second intervals)
-- JSON persistence (`data/positions.json`)
-
-**Risk Analyzer Checks:**
-1. ✅ Mint/Freeze authority detection
-2. ✅ Liquidity calculation (Birdeye + SOL price)
-3. ✅ LP token burn/lock verification
-4. ✅ Sellability test (honeypot detection via Jupiter simulation)
-5. ✅ Holder distribution analysis
-6. ✅ Transfer tax detection (Token-2022)
-
-### ✅ COMPLETE - Telegram Bot
-
-| Component | File | Status | Notes |
-|-----------|------|--------|-------|
-| Commands | `src/bot/commands.rs` | ✅ Complete | All commands + callback handlers |
-| Keyboards | `src/bot/keyboards.rs` | ✅ Complete | Interactive menus |
-| Notifications | `src/bot/notification.rs` | ✅ Complete | Trade/error alerts |
-| Bot State | `src/bot/mod.rs` | ✅ Complete | Shared state management |
-
-**Implemented Commands:**
-- `/start` - Welcome message + main menu
-- `/help` - Command listing
-- `/balance` - Wallet SOL balance
-- `/autotrader` - Start/stop controls + status
-- `/strategy` - Strategy management
-- `/positions` - Active positions + stats
-- `/analyze <address>` - Full risk analysis
-- `/snipe <address> [amount]` - Manual token purchase
-
-**Callback Features:**
-- Interactive button navigation
-- Confirmation dialogs
-- Real-time status updates
-- MarkdownV2 formatting
+### PNL Performance Chart - COMPLETE
+- Chart.js integration
+- Cumulative PNL line chart
+- Zero reference line
+- Green profit / red loss zones
+- Gradient fills and animations
+- 14-day demo data display
 
 ---
 
-## Files Structure
+## Current Architecture
 
 ```
-D:\AI Projects\trader-tony-v4\
-├── Cargo.toml          # Dependencies + manifest
-├── Cargo.lock          # Locked dependencies
-├── .env.example        # Environment template
-├── README.md           # Project documentation
-├── TODO.md             # Development checklist
-├── src/
-│   ├── main.rs         # Entry point
-│   ├── config.rs       # Configuration loading
-│   ├── error.rs        # Error definitions
-│   ├── api/
-│   │   ├── mod.rs
-│   │   ├── helius.rs   # Helius DAS client
-│   │   ├── jupiter.rs  # Jupiter swap client
-│   │   └── birdeye.rs  # Birdeye data client
-│   ├── bot/
-│   │   ├── mod.rs
-│   │   ├── commands.rs # Telegram command handlers
-│   │   ├── keyboards.rs# Interactive keyboards
-│   │   └── notification.rs # Alert system
-│   ├── models/
-│   │   ├── mod.rs
-│   │   └── token.rs    # Token metadata
-│   ├── solana/
-│   │   ├── mod.rs
-│   │   ├── client.rs   # RPC client wrapper
-│   │   └── wallet.rs   # Wallet management
-│   └── trading/
-│       ├── mod.rs
-│       ├── autotrader.rs # Main trading engine
-│       ├── position.rs   # Position management
-│       ├── risk.rs       # Risk analysis
-│       └── strategy.rs   # Strategy definitions
-├── data/               # Runtime data (created on first run)
-│   ├── positions.json  # Position persistence
-│   └── strategies.json # Strategy persistence
-└── docs/
-    ├── API.md
-    ├── DEPLOYMENT.md
-    └── STRATEGY.md
+┌─────────────────────────────────────┐
+│     VERCEL (Frontend)               │
+│  https://trader-tony.vercel.app     │
+│  - Static HTML/JS/CSS               │
+│  - Cyberpunk terminal theme         │
+│  - PNL chart visualization          │
+│  - Wallet connection UI             │
+└──────────────────┬──────────────────┘
+                   │ HTTPS / WSS (Direct)
+┌──────────────────▼──────────────────┐
+│     RAILWAY (Backend)               │
+│  https://trader-tony.up.railway.app │
+│  - REST API (Axum)                  │
+│  - WebSocket server                 │
+│  - AutoTrader engine                │
+│  - Copy trade system                │
+│  - Risk analysis                    │
+└──────────────────┬──────────────────┘
+                   │
+                   ▼
+            Solana Blockchain
 ```
 
 ---
 
-## Remaining Work
+## API Endpoints
 
-### Critical (Before First Run)
-
-1. **Verify Compilation** - Run `cargo build --release` and fix any errors
-2. **Create .env File** - Copy `.env.example` to `.env` and fill in:
-   - `SOLANA_RPC_URL` (Helius RPC recommended)
-   - `SOLANA_PRIVATE_KEY` (Base58 encoded)
-   - `HELIUS_API_KEY`
-   - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_ADMIN_USER_ID`
-
-### High Priority
-
-3. **Demo Mode Testing** - Set `DEMO_MODE=true` and verify:
-   - Bot starts and responds to commands
-   - AutoTrader runs scan cycles
-   - Simulated positions are created
-   - Exit conditions trigger correctly
-
-4. **Risk Analysis Validation** - Test `/analyze` on known tokens
-
-### Medium Priority
-
-5. **Address Compiler Warnings** - Clean up unused code, dead_code warnings
-6. **Add Unit Tests** - Test critical paths (risk analysis, position management)
-7. **Add LICENSE File**
-
-### Low Priority
-
-8. **Performance Optimization** - Profile and optimize hot paths
-9. **Additional Documentation** - Code comments, API docs
-10. **Multi-strategy Support** - Test concurrent strategy execution
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | Health check |
+| `/api/wallet` | GET | Wallet info and balance |
+| `/api/stats` | GET | Trading statistics |
+| `/api/positions` | GET | Active positions |
+| `/api/trades` | GET | Trade history |
+| `/api/config` | GET/PUT | AutoTrader configuration |
+| `/api/autotrader/start` | POST | Start trading |
+| `/api/autotrader/stop` | POST | Stop trading |
+| `/api/analyze` | POST | Token risk analysis |
+| `/api/signals` | GET | Trade signals |
+| `/api/signals/active` | GET | Active signals |
+| `/api/copy/register` | POST/DELETE | Copy trade registration |
+| `/api/copy/status` | GET | Copy trade status |
+| `/api/copy/settings` | PUT | Update copy settings |
+| `/api/copy/positions` | GET | Copy positions |
+| `/api/copy/stats` | GET | Copy trade stats |
+| `/api/copy/build-tx` | POST | Build copy transaction |
+| `/ws` | WebSocket | Real-time updates |
 
 ---
 
-## Environment Variables Reference
+## Environment Variables (Railway)
 
-```env
-# Solana Configuration
-SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
-SOLANA_PRIVATE_KEY=your_base58_private_key
+### Required
+| Variable | Description |
+|----------|-------------|
+| `SOLANA_RPC_URL` | Helius/QuickNode RPC endpoint |
+| `WALLET_PRIVATE_KEY` | Bot wallet private key (base58) |
+| `HELIUS_API_KEY` | Helius API key |
+| `BIRDEYE_API_KEY` | Birdeye API key |
 
-# API Keys
-HELIUS_API_KEY=your_helius_api_key
-JUPITER_API_KEY=your_jupiter_api_key  # Optional
-BIRDEYE_API_KEY=your_birdeye_api_key
-
-# Telegram
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_ADMIN_USER_ID=your_telegram_user_id
-
-# Trading Configuration
-DEMO_MODE=true                    # Start in demo mode!
-MAX_POSITION_SIZE_SOL=0.01
-TOTAL_BUDGET_SOL=0.1
-DEFAULT_STOP_LOSS_PERCENT=15
-DEFAULT_TAKE_PROFIT_PERCENT=50
-DEFAULT_TRAILING_STOP_PERCENT=5
-MAX_HOLD_TIME_MINUTES=240
-
-# Risk Parameters
-MIN_LIQUIDITY_SOL=10
-MAX_RISK_LEVEL=50
-MIN_HOLDERS=50
-DEFAULT_SLIPPAGE_BPS=100
-PRIORITY_FEE_MICRO_LAMPORTS=10000
-```
+### Optional (have defaults)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEMO_MODE` | `true` | Simulate trades without real execution |
+| `API_PORT` | (empty) | Let Railway assign port |
+| `CORS_ORIGINS` | `*` | Allowed origins |
+| `AUTO_START_TRADING` | `false` | Auto-start on boot |
+| `TREASURY_WALLET` | - | Fee collection wallet |
+| `COPY_TRADE_FEE_PERCENT` | `10.0` | Fee on copy trade profits |
 
 ---
 
-## Quick Start Guide
+## Testing Instructions
 
-### 1. Install Rust
-```powershell
-# Windows (PowerShell)
-Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
-.\rustup-init.exe
+### Demo Mode Testing (Current State)
+1. Visit https://trader-tony.vercel.app
+2. Dashboard shows demo/mock data
+3. All UI elements functional with placeholder data
+4. Use to verify:
+   - Page loads correctly
+   - Charts render properly
+   - Buttons/controls respond
+   - WebSocket connects (check browser console)
+
+### Testing API Directly
+```bash
+# Health check
+curl https://trader-tony.up.railway.app/api/health
+
+# Get wallet info
+curl https://trader-tony.up.railway.app/api/wallet
+
+# Get stats
+curl https://trader-tony.up.railway.app/api/stats
+
+# Get positions
+curl https://trader-tony.up.railway.app/api/positions
 ```
 
-### 2. Build Project
-```powershell
-cd "D:\AI Projects\trader-tony-v4"
+### Local Development Testing
+```bash
+cd trader-tony-v4
+cp .env.example .env  # Fill in API keys
 cargo build --release
+mkdir data
+./target/release/trader-tony-v4
+
+# In another terminal
+cd webapp && python -m http.server 8080
+# Visit http://localhost:8080
 ```
 
-### 3. Configure Environment
-```powershell
-Copy-Item .env.example .env
-# Edit .env with your credentials
-```
+---
 
-### 4. Run in Demo Mode
-```powershell
-# Ensure DEMO_MODE=true in .env
-.\target\release\trader-tony-v4.exe
-```
+## Next Steps
 
-### 5. Test via Telegram
-- Send `/start` to your bot
-- Try `/balance` to verify wallet connection
-- Try `/autotrader` to see controls
-- Use `/analyze <token_address>` to test risk analysis
+### Immediate (Before Live Trading)
+1. **Test with real RPC connection** - Verify Helius API works
+2. **Test wallet balance display** - Should show actual SOL balance
+3. **Test token analysis** - Try analyzing a real token address
+4. **Review risk parameters** - Ensure stop-loss, take-profit are set correctly
+
+### To Go Live
+1. **Set `DEMO_MODE=false`** in Railway environment
+2. **Fund bot wallet** - Transfer SOL for trading
+3. **Configure strategies** - Set position sizes, risk limits
+4. **Start AutoTrader** - Use dashboard controls or API
+5. **Monitor closely** - Watch first few trades carefully
+
+### UI Improvements (Future)
+- Additional chart types (trade distribution, token performance)
+- Sound notifications for trades
+- Mobile-responsive refinements
+- Dark/light theme toggle
+- More detailed position cards
+- Trade execution animations
+
+### Feature Enhancements (Future)
+- Copy trading activation (backend ready)
+- Manual buy/sell from dashboard
+- Strategy configuration UI
+- Historical performance analytics
+- Email/webhook notifications
+
+---
+
+## Files Modified This Session
+
+| File | Change |
+|------|--------|
+| `Dockerfile` | Updated Rust 1.75 → 1.83 |
+| `railway.toml` | Fixed binary path, dockerfile builder |
+| `src/main.rs` | Non-blocking RPC connection check |
+| `webapp/js/config.js` | Added Railway backend URLs |
+| `webapp/js/api.js` | Direct Railway API calls |
+| `webapp/js/websocket.js` | Direct Railway WebSocket |
+| `webapp/js/chart.js` | NEW - PNL chart component |
+| `webapp/css/terminal.css` | NEW - Cyberpunk theme (renamed from styles.css) |
+| `webapp/index.html` | Added Chart.js, PNL section, new CSS reference |
+| `webapp/vercel.json` | Disabled aggressive caching |
+| `README.md` | Updated for REST API architecture |
+
+---
+
+## Git Commits This Session
+
+1. `fix: update Dockerfile to Rust 1.83 for Cargo.lock v4 support`
+2. `fix: update railway.toml to use Dockerfile builder and correct binary path`
+3. `fix: remove Docker HEALTHCHECK (Railway uses its own)`
+4. `fix: don't crash on Solana RPC connection check failure`
+5. `fix: frontend calls Railway backend directly instead of Vercel proxy`
+6. `feat: add cyberpunk trading terminal UI and PNL chart`
+7. `fix: disable aggressive caching for CSS/JS files`
+8. `fix: rename CSS file to bust CDN cache`
 
 ---
 
 ## Known Issues
 
-1. **E0599 Error (Historical)** - Transaction signing was commented out in a previous version due to compilation issues. Current code appears to have this resolved, but needs verification.
-
-2. **Helius DAS Token Discovery** - The `get_recent_tokens` function uses a placeholder implementation. May need refinement based on actual Helius API behavior.
-
-3. **find_primary_pair_info** - Referenced in risk.rs for LP discovery but implementation may be incomplete.
+1. **WebSocket reconnection** - May need manual refresh if connection drops
+2. **Demo mode detection** - Frontend should auto-detect and show demo data more clearly
+3. **Mobile layout** - Some elements may need adjustment on small screens
 
 ---
 
-## Monetization Roadmap (Future)
+## Security Reminders
 
-Based on conversation history, planned features include:
-- TONY token with transaction tax mechanism
-- Token-gated access (tiered: 500K/2M/10M/50M tokens)
-- Web dashboard for transparency
-- Performance-based fee structure
-
----
-
-## Summary
-
-TraderTony V4 is a well-architected, nearly complete autonomous trading bot. The codebase demonstrates:
-- Clean Rust patterns (Arc/Mutex for shared state, proper async/await)
-- Comprehensive error handling with retries
-- Full Telegram bot interface
-- Multi-factor risk analysis
-- Flexible strategy system
-
-**Next Steps:**
-1. Run `cargo build --release` in PowerShell
-2. Create and configure `.env` file
-3. Test in demo mode
-4. Validate risk analysis on real tokens
-5. Gradually transition to real trading with small amounts
+- **NEVER use main wallet** - Always use dedicated burner wallet
+- **Start with small amounts** - Test with 0.1-0.5 SOL first
+- **Monitor closely** - Watch first trades carefully
+- **Keep DEMO_MODE=true** until ready for real trading
+- **Review code** - Understand trading logic before going live
 
 ---
 
-*Report generated by Claude AI - January 7, 2026*
+## Support & Resources
+
+- **GitHub**: https://github.com/tony-42069/trader-tony-v4
+- **Deployment Guide**: See `DEPLOYMENT.md`
+- **API Documentation**: See README.md
+
+---
+
+*Report updated by Claude Code - January 9, 2026*
+*Session: Deployment complete, UI overhaul, ready for testing*
