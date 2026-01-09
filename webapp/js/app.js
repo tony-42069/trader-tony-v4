@@ -18,7 +18,12 @@ const App = {
         trades: [],
         wallet: null,
         autotraderStatus: null,
+        simulationStats: null,
+        simulatedPositions: [],
     },
+
+    // Dry run mode
+    dryRunMode: false,
 
     /**
      * Initialize the application
@@ -105,6 +110,7 @@ const App = {
                 this.loadPositions(),
                 this.loadTrades(),
                 this.loadAutotraderStatus(),
+                this.loadSimulationData(),
             ]);
         } catch (error) {
             console.error('[App] Error loading data:', error);
@@ -175,8 +181,43 @@ const App = {
             const status = await API.getAutotraderStatus();
             this.cache.autotraderStatus = status;
             this.updateAutotraderDisplay(status);
+
+            // Check if dry run mode is active
+            if (status.dry_run_mode) {
+                this.dryRunMode = true;
+            }
         } catch (error) {
             console.error('[App] Error loading autotrader status:', error);
+        }
+    },
+
+    /**
+     * Load simulation data (dry run mode)
+     */
+    async loadSimulationData() {
+        try {
+            // First check if dry run mode is active via stats endpoint
+            const statsResponse = await API.getSimulationStats();
+
+            if (statsResponse.dry_run_mode) {
+                this.dryRunMode = true;
+                this.cache.simulationStats = statsResponse.stats;
+
+                // Load simulated positions
+                const positionsResponse = await API.getSimulatedPositions();
+                this.cache.simulatedPositions = positionsResponse.positions || [];
+
+                // Show simulation section and update display
+                this.showSimulationSection(true);
+                this.updateSimulationDisplay(statsResponse.stats, this.cache.simulatedPositions);
+            } else {
+                this.dryRunMode = false;
+                this.showSimulationSection(false);
+            }
+        } catch (error) {
+            console.error('[App] Error loading simulation data:', error);
+            // If simulation endpoints fail, just hide the section
+            this.showSimulationSection(false);
         }
     },
 
@@ -357,6 +398,153 @@ const App = {
     },
 
     /**
+     * Show/hide simulation section
+     */
+    showSimulationSection(show) {
+        const section = document.getElementById('simulationSection');
+        if (section) {
+            section.style.display = show ? 'block' : 'none';
+        }
+    },
+
+    /**
+     * Update simulation display
+     */
+    updateSimulationDisplay(stats, positions) {
+        // Update stats
+        const elements = {
+            simTotalTrades: stats.total_simulated_trades || 0,
+            simWinRate: `${this.formatNumber(stats.win_rate || 0, 1)}%`,
+            simRealizedPnl: `${this.formatNumberSigned(stats.total_realized_pnl_sol || 0)} SOL`,
+            simUnrealizedPnl: `${this.formatNumberSigned(stats.total_unrealized_pnl_sol || 0)} SOL`,
+            simWouldHaveSpent: `${this.formatNumber(stats.would_have_spent_sol || 0, 3)} SOL`,
+            simWouldHaveReturned: `${this.formatNumber(stats.would_have_returned_sol || 0, 3)} SOL`,
+        };
+
+        for (const [id, value] of Object.entries(elements)) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.textContent = value;
+                // Add color to PnL values
+                if (id.includes('Pnl')) {
+                    const numValue = parseFloat(String(value).replace(/[^\d.-]/g, ''));
+                    el.className = `sim-stat-value ${numValue >= 0 ? 'positive' : 'negative'}`;
+                }
+            }
+        }
+
+        // Update simulated positions table
+        this.updateSimulatedPositionsTable(positions);
+    },
+
+    /**
+     * Update simulated positions table
+     */
+    updateSimulatedPositionsTable(positions) {
+        const tbody = document.getElementById('simulatedPositionsBody');
+        if (!tbody) return;
+
+        if (!positions || positions.length === 0) {
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No simulated positions yet</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = positions.map(pos => {
+            const pnlClass = (pos.unrealized_pnl_sol || 0) >= 0 ? 'positive' : 'negative';
+            const statusClass = pos.status === 'Open' ? 'open' : 'closed';
+
+            return `
+                <tr>
+                    <td>
+                        <div class="token-cell">
+                            <span class="token-symbol">${pos.token_symbol || 'Unknown'}</span>
+                            <span class="token-mint" title="${pos.token_address}">${this.shortenAddress(pos.token_address, 4)}</span>
+                        </div>
+                    </td>
+                    <td>${this.formatNumber(pos.entry_amount_sol, 4)} SOL</td>
+                    <td>${this.formatNumber(pos.current_value_sol, 4)} SOL</td>
+                    <td class="${pnlClass}">
+                        ${this.formatNumberSigned(pos.unrealized_pnl_sol)} SOL
+                        <span class="pnl-percent">(${this.formatNumberSigned(pos.unrealized_pnl_percent)}%)</span>
+                    </td>
+                    <td>
+                        <span class="risk-score risk-${this.getRiskLevel(pos.risk_score)}">${pos.risk_score}/100</span>
+                    </td>
+                    <td title="${pos.selection_reason}">
+                        <span class="selection-reason">${this.truncate(pos.selection_reason, 20)}</span>
+                    </td>
+                    <td>
+                        ${pos.status === 'Open' ? `
+                            <button class="btn btn-sm btn-danger" onclick="App.closeSimulatedPosition('${pos.id}')">
+                                Close
+                            </button>
+                        ` : `<span class="status-badge status-${statusClass}">${pos.status}</span>`}
+                    </td>
+                </tr>
+            `;
+        }).join('');
+    },
+
+    /**
+     * Close a simulated position
+     */
+    async closeSimulatedPosition(positionId) {
+        try {
+            await API.closeSimulatedPosition(positionId);
+            this.showToast('Simulated position closed', 'success');
+            await this.loadSimulationData();
+        } catch (error) {
+            console.error('[App] Error closing simulated position:', error);
+            this.showToast('Failed to close position', 'error');
+        }
+    },
+
+    /**
+     * Clear all simulated positions
+     */
+    async clearSimulation() {
+        if (!confirm('Are you sure you want to clear all simulated positions? This cannot be undone.')) {
+            return;
+        }
+
+        try {
+            await API.clearSimulation();
+            this.showToast('All simulated positions cleared', 'success');
+            await this.loadSimulationData();
+        } catch (error) {
+            console.error('[App] Error clearing simulation:', error);
+            this.showToast('Failed to clear simulation', 'error');
+        }
+    },
+
+    /**
+     * Get risk level class from score
+     */
+    getRiskLevel(score) {
+        if (score <= 25) return 'low';
+        if (score <= 50) return 'medium';
+        if (score <= 75) return 'high';
+        return 'very-high';
+    },
+
+    /**
+     * Truncate string
+     */
+    truncate(str, maxLength) {
+        if (!str) return '';
+        return str.length > maxLength ? str.slice(0, maxLength) + '...' : str;
+    },
+
+    /**
+     * Format number with sign
+     */
+    formatNumberSigned(num, decimals = 3) {
+        if (num === null || num === undefined) return '-';
+        const formatted = this.formatNumber(Math.abs(num), decimals);
+        return num >= 0 ? `+${formatted}` : `-${formatted}`;
+    },
+
+    /**
      * Update connection status indicator
      */
     updateConnectionStatus(status) {
@@ -471,6 +659,12 @@ const App = {
         const enableCopyTradeBtn = document.getElementById('enableCopyTradeBtn');
         if (enableCopyTradeBtn) {
             enableCopyTradeBtn.addEventListener('click', () => this.handleEnableCopyTrade());
+        }
+
+        // Clear simulation button
+        const clearSimulationBtn = document.getElementById('clearSimulationBtn');
+        if (clearSimulationBtn) {
+            clearSimulationBtn.addEventListener('click', () => this.clearSimulation());
         }
     },
 

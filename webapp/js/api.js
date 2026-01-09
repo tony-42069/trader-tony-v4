@@ -320,6 +320,46 @@ const API = {
     },
 
     // ==========================================
+    // Simulation (Dry Run Mode) Endpoints
+    // ==========================================
+
+    /**
+     * Get all simulated positions
+     */
+    async getSimulatedPositions() {
+        return this.get('/api/simulation/positions');
+    },
+
+    /**
+     * Get open simulated positions only
+     */
+    async getOpenSimulatedPositions() {
+        return this.get('/api/simulation/positions/open');
+    },
+
+    /**
+     * Get simulation statistics
+     */
+    async getSimulationStats() {
+        return this.get('/api/simulation/stats');
+    },
+
+    /**
+     * Clear all simulated positions
+     */
+    async clearSimulation() {
+        return this.post('/api/simulation/clear');
+    },
+
+    /**
+     * Manually close a simulated position
+     * @param {string} positionId - Simulated position ID
+     */
+    async closeSimulatedPosition(positionId) {
+        return this.post(`/api/simulation/close/${positionId}`);
+    },
+
+    // ==========================================
     // Manual Trading Endpoints
     // ==========================================
 
@@ -650,6 +690,86 @@ const API = {
                 estimated_output: 4273504,
                 estimated_fee: null,
                 estimated_pnl: null,
+            };
+        }
+
+        // Simulation positions
+        if (endpoint === '/api/simulation/positions' || endpoint === '/api/simulation/positions/open') {
+            return {
+                positions: [
+                    {
+                        id: 'sim_001',
+                        token_address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+                        token_symbol: 'BONK',
+                        token_name: 'Bonk',
+                        entry_price_sol: 0.0000234,
+                        entry_amount_sol: 0.5,
+                        token_amount: 21367521,
+                        entry_time: new Date(Date.now() - 3600000).toISOString(),
+                        current_price_sol: 0.0000312,
+                        current_value_sol: 0.667,
+                        unrealized_pnl_sol: 0.167,
+                        unrealized_pnl_percent: 33.4,
+                        risk_score: 35,
+                        risk_details: ['Good liquidity', 'LP burned'],
+                        selection_reason: "Passed 'Aggressive' strategy criteria",
+                        strategy_id: 'strat_001',
+                        status: 'Open',
+                        highest_price_sol: 0.0000320,
+                    },
+                    {
+                        id: 'sim_002',
+                        token_address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
+                        token_symbol: 'WIF',
+                        token_name: 'dogwifhat',
+                        entry_price_sol: 0.0145,
+                        entry_amount_sol: 1.0,
+                        token_amount: 68.97,
+                        entry_time: new Date(Date.now() - 7200000).toISOString(),
+                        current_price_sol: 0.0132,
+                        current_value_sol: 0.91,
+                        unrealized_pnl_sol: -0.09,
+                        unrealized_pnl_percent: -9.0,
+                        risk_score: 42,
+                        risk_details: ['Moderate liquidity', 'Active development'],
+                        selection_reason: "Passed 'Conservative' strategy criteria",
+                        strategy_id: 'strat_002',
+                        status: 'Open',
+                        highest_price_sol: 0.0148,
+                    },
+                ],
+                total: 2,
+                dry_run_mode: true,
+            };
+        }
+
+        // Simulation stats
+        if (endpoint === '/api/simulation/stats') {
+            return {
+                stats: {
+                    total_simulated_trades: 15,
+                    open_positions: 2,
+                    closed_positions: 13,
+                    winning_trades: 9,
+                    losing_trades: 4,
+                    total_realized_pnl_sol: 2.45,
+                    total_unrealized_pnl_sol: 0.077,
+                    win_rate: 69.23,
+                    would_have_spent_sol: 8.5,
+                    would_have_returned_sol: 10.95,
+                    average_pnl_percent: 18.7,
+                    best_trade_pnl_percent: 85.5,
+                    worst_trade_pnl_percent: -22.3,
+                },
+                dry_run_mode: true,
+            };
+        }
+
+        // Simulation clear
+        if (endpoint === '/api/simulation/clear') {
+            return {
+                success: true,
+                message: 'All simulated positions cleared',
             };
         }
 

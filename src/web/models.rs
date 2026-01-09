@@ -18,6 +18,7 @@ pub struct HealthResponse {
 pub struct AutoTraderStatus {
     pub running: bool,
     pub demo_mode: bool,
+    pub dry_run_mode: bool,
     pub active_strategies: usize,
     pub active_positions: usize,
 }
@@ -340,4 +341,23 @@ pub struct CopyTradeStatsResponse {
     pub avg_pnl_percent: f64,
     pub best_trade_pnl_sol: f64,
     pub worst_trade_pnl_sol: f64,
+}
+
+// ============================================================================
+// Simulation (Dry Run Mode)
+// ============================================================================
+
+/// Response for simulated positions list
+#[derive(Debug, Serialize)]
+pub struct SimulatedPositionsResponse {
+    pub positions: Vec<crate::models::SimulatedPosition>,
+    pub total: usize,
+    pub dry_run_mode: bool,
+}
+
+/// Response for simulation stats
+#[derive(Debug, Serialize)]
+pub struct SimulationStatsResponse {
+    pub stats: crate::models::SimulationStats,
+    pub dry_run_mode: bool,
 }

@@ -27,6 +27,7 @@ pub struct Config {
 
     // Trading Configuration
     pub demo_mode: bool,
+    pub dry_run_mode: bool,  // Scans real tokens, simulates trades without execution
     pub max_position_size_sol: f64,
     pub total_budget_sol: f64,
     pub default_stop_loss_percent: u32,
@@ -97,6 +98,9 @@ impl Config {
             demo_mode: env::var("DEMO_MODE")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(true), // Default to demo mode
+            dry_run_mode: env::var("DRY_RUN_MODE")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false), // Default to false
             max_position_size_sol: env::var("MAX_POSITION_SIZE_SOL")
                 .unwrap_or_else(|_| "0.01".to_string())
                 .parse()

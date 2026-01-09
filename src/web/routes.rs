@@ -63,6 +63,13 @@ pub fn create_routes(state: AppState) -> Router {
         // Copy Trade - Transaction Builder
         .route("/api/copy/build-tx", post(handlers::build_copy_transaction))
 
+        // Simulation (Dry Run Mode)
+        .route("/api/simulation/positions", get(handlers::get_simulated_positions))
+        .route("/api/simulation/positions/open", get(handlers::get_open_simulated_positions))
+        .route("/api/simulation/stats", get(handlers::get_simulation_stats))
+        .route("/api/simulation/clear", post(handlers::clear_simulation))
+        .route("/api/simulation/close/:id", post(handlers::close_simulated_position))
+
         // WebSocket
         .route("/ws", get(ws_handler))
 

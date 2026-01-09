@@ -646,6 +646,92 @@ code, .stat-value, .wallet-address, .balance-value,
 .badge-warning { border: 1px solid var(--neon-amber); color: var(--neon-amber); background: rgba(255, 204, 0, 0.1); }
 .badge-success { border: 1px solid var(--neon-green); color: var(--neon-green); background: rgba(0, 255, 157, 0.1); }
 .badge-danger { border: 1px solid var(--neon-red); color: var(--neon-red); background: rgba(255, 0, 85, 0.1); }
+.badge-simulation {
+    border: 1px solid var(--neon-purple);
+    color: var(--neon-purple);
+    background: rgba(191, 0, 255, 0.15);
+    animation: glow-pulse 2s ease-in-out infinite;
+}
+
+/* ============================================================================
+   Simulation Section (Dry Run Mode)
+   ============================================================================ */
+.simulation-section {
+    border: 1px solid var(--neon-purple);
+    box-shadow: 0 0 20px rgba(191, 0, 255, 0.2);
+}
+
+.simulation-section .card-header {
+    border-bottom-color: rgba(191, 0, 255, 0.3);
+}
+
+.simulation-badges {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.simulation-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    padding: 1rem;
+    background: var(--bg-input);
+    border-radius: var(--radius);
+    border: 1px solid rgba(191, 0, 255, 0.2);
+}
+
+.sim-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.sim-stat-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.sim-stat-value {
+    font-size: 1.1rem;
+    font-family: var(--font-mono);
+    color: var(--neon-purple);
+}
+
+.subsection-title {
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border-dim);
+}
+
+.btn-sm {
+    padding: 0.4rem 0.8rem;
+    font-size: 0.75rem;
+}
+
+/* Dry Run Mode Banner */
+.dry-run-banner {
+    background: linear-gradient(135deg, rgba(191, 0, 255, 0.1), rgba(0, 242, 255, 0.1));
+    border: 1px solid var(--neon-purple);
+    padding: 0.75rem 1.5rem;
+    margin-bottom: 1rem;
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+}
+
+.dry-run-banner-text {
+    color: var(--neon-purple);
+    font-weight: 600;
+    font-size: 0.9rem;
+}
 
 /* Control Panel */
 .autotrader-status {

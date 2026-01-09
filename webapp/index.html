@@ -266,6 +266,69 @@
             </div>
         </div>
 
+        <!-- Simulation Section (Dry Run Mode) -->
+        <section class="card simulation-section" id="simulationSection" style="display: none;">
+            <div class="card-header">
+                <h2 class="card-title">Dry Run Simulation</h2>
+                <div class="simulation-badges">
+                    <span class="badge badge-simulation">DRY RUN MODE</span>
+                    <button class="btn btn-sm btn-danger" id="clearSimulationBtn">Clear All</button>
+                </div>
+            </div>
+            <div class="card-body">
+                <!-- Simulation Stats -->
+                <div class="simulation-stats">
+                    <div class="sim-stat">
+                        <span class="sim-stat-label">Simulated Trades</span>
+                        <span class="sim-stat-value" id="simTotalTrades">0</span>
+                    </div>
+                    <div class="sim-stat">
+                        <span class="sim-stat-label">Win Rate</span>
+                        <span class="sim-stat-value" id="simWinRate">0%</span>
+                    </div>
+                    <div class="sim-stat">
+                        <span class="sim-stat-label">Realized P&L</span>
+                        <span class="sim-stat-value" id="simRealizedPnl">0 SOL</span>
+                    </div>
+                    <div class="sim-stat">
+                        <span class="sim-stat-label">Unrealized P&L</span>
+                        <span class="sim-stat-value" id="simUnrealizedPnl">0 SOL</span>
+                    </div>
+                    <div class="sim-stat">
+                        <span class="sim-stat-label">Would Have Spent</span>
+                        <span class="sim-stat-value" id="simWouldHaveSpent">0 SOL</span>
+                    </div>
+                    <div class="sim-stat">
+                        <span class="sim-stat-label">Would Have Returned</span>
+                        <span class="sim-stat-value" id="simWouldHaveReturned">0 SOL</span>
+                    </div>
+                </div>
+
+                <!-- Simulated Positions Table -->
+                <h3 class="subsection-title">Simulated Positions</h3>
+                <div class="table-container">
+                    <table class="table" id="simulatedPositionsTable">
+                        <thead>
+                            <tr>
+                                <th>Token</th>
+                                <th>Entry</th>
+                                <th>Current</th>
+                                <th>P&L</th>
+                                <th>Risk</th>
+                                <th>Reason</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="simulatedPositionsBody">
+                            <tr class="empty-row">
+                                <td colspan="7">No simulated positions yet</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
         <!-- Copy Trade Section -->
         <section class="card copy-trade-section">
             <div class="card-header">

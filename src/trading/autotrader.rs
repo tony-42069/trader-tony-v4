@@ -19,6 +19,7 @@ use crate::config::Config;
 use crate::trading::position::PositionManager; // Assuming these exist
 use crate::trading::risk::{RiskAnalysis, RiskAnalyzer}; // Assuming these exist
 use crate::trading::strategy::Strategy;
+use crate::trading::simulation::SimulationManager;
 use crate::models::token::TokenMetadata;
 use solana_sdk::signature::Signature;
 use solana_sdk::pubkey::Pubkey;
@@ -35,6 +36,7 @@ async fn run_scan_cycle(
     config: Arc<Config>,
     wallet_manager: Arc<WalletManager>,
     jupiter_client: Arc<JupiterClient>,
+    simulation_manager: Option<Arc<SimulationManager>>,
     // solana_client is implicitly used by risk_analyzer/position_manager/wallet_manager
 ) -> Result<()> {
     debug!("Scanning for trading opportunities...");
@@ -57,8 +59,13 @@ async fn run_scan_cycle(
         return Ok(());
     }
 
-    // --- Real Mode Scan ---
-    info!("Scanning for new tokens using Helius...");
+    // --- Dry Run or Real Mode Scan ---
+    // In dry run mode, we scan real tokens but simulate trades instead of executing
+    if config.dry_run_mode {
+        info!("🔍 [DRY RUN] Scanning for real tokens (simulation mode)...");
+    } else {
+        info!("Scanning for new tokens using Helius...");
+    }
     match helius_client.get_recent_tokens(60).await { // TODO: Make age configurable
         Ok(tokens) => {
             if tokens.is_empty() {
@@ -78,25 +85,65 @@ async fn run_scan_cycle(
 
                         for strategy in &enabled_strategies {
                             if meets_strategy_criteria(&token, &risk_analysis, strategy) {
-                                info!("Token {} meets criteria for strategy '{}'", token.symbol, strategy.name);
-                                if should_execute_buy_task(&token, strategy, &position_manager).await? { // Added ? for error handling
-                                    match execute_buy_task(
-                                        &token,
-                                        strategy,
-                                        &position_manager,
-                                        &jupiter_client,
-                                        &wallet_manager, // Pass WalletManager which holds SolanaClient
-                                        &config,
-                                        None, // Pass None for notification_manager
-                                    ).await {
-                                        Ok(_) => info!("Successfully executed buy and confirmed for {} via strategy '{}'", token.symbol, strategy.name),
-                                        Err(e) => error!("Failed to execute buy for {}: {:?}", token.symbol, e), // Error includes confirmation failure now
+                                info!("✅ [CANDIDATE] Token {} meets criteria for strategy '{}' - Risk: {}/100",
+                                    token.symbol, strategy.name, risk_analysis.risk_level);
+
+                                // DRY RUN MODE: Simulate the trade instead of executing
+                                if config.dry_run_mode {
+                                    if let Some(ref sim_mgr) = simulation_manager {
+                                        // Check if we already have a simulated position
+                                        if !sim_mgr.has_open_position(&token.address).await {
+                                            match sim_mgr.simulate_buy(
+                                                &token.address,
+                                                &token.symbol,
+                                                &token.name,
+                                                risk_analysis.liquidity_sol / 1000.0, // Estimate price from liquidity
+                                                strategy.max_position_size_sol,
+                                                risk_analysis.risk_level,
+                                                risk_analysis.details.clone(),
+                                                format!("Passed '{}' strategy criteria", strategy.name),
+                                                strategy.id.clone(),
+                                            ).await {
+                                                Ok(_) => info!("🔍 [DRY RUN] Successfully simulated buy for {} via strategy '{}'", token.symbol, strategy.name),
+                                                Err(e) => warn!("🔍 [DRY RUN] Failed to simulate buy for {}: {:?}", token.symbol, e),
+                                            }
+                                        } else {
+                                            debug!("🔍 [DRY RUN] Already have simulated position for {}", token.symbol);
+                                        }
                                     }
                                 } else {
-                                     debug!("Buy condition not met for token {} and strategy '{}'", token.symbol, strategy.name);
+                                    // REAL MODE: Execute actual trade
+                                    if should_execute_buy_task(&token, strategy, &position_manager).await? {
+                                        match execute_buy_task(
+                                            &token,
+                                            strategy,
+                                            &position_manager,
+                                            &jupiter_client,
+                                            &wallet_manager,
+                                            &config,
+                                            None,
+                                        ).await {
+                                            Ok(_) => info!("Successfully executed buy and confirmed for {} via strategy '{}'", token.symbol, strategy.name),
+                                            Err(e) => error!("Failed to execute buy for {}: {:?}", token.symbol, e),
+                                        }
+                                    } else {
+                                        debug!("Buy condition not met for token {} and strategy '{}'", token.symbol, strategy.name);
+                                    }
                                 }
                             } else {
-                                 debug!("Token {} does not meet criteria for strategy '{}'", token.symbol, strategy.name);
+                                // Enhanced logging for rejected tokens
+                                if risk_analysis.risk_level > strategy.max_risk_level {
+                                    info!("❌ [REJECT] {} - Risk too high: {}/100 (max: {})",
+                                        token.symbol, risk_analysis.risk_level, strategy.max_risk_level);
+                                } else if risk_analysis.liquidity_sol < strategy.min_liquidity_sol as f64 {
+                                    info!("❌ [REJECT] {} - Liquidity too low: {:.2} SOL (min: {})",
+                                        token.symbol, risk_analysis.liquidity_sol, strategy.min_liquidity_sol);
+                                } else if risk_analysis.holder_count < strategy.min_holders {
+                                    info!("❌ [REJECT] {} - Not enough holders: {} (min: {})",
+                                        token.symbol, risk_analysis.holder_count, strategy.min_holders);
+                                } else {
+                                    debug!("Token {} does not meet criteria for strategy '{}'", token.symbol, strategy.name);
+                                }
                             }
                         }
                     }
@@ -385,6 +432,7 @@ pub struct AutoTrader {
     config: Arc<Config>,
     pub position_manager: Arc<PositionManager>, // Expose for references
     pub risk_analyzer: Arc<RiskAnalyzer>, // Expose for /analyze commands
+    pub simulation_manager: Option<Arc<SimulationManager>>, // For DRY_RUN_MODE
     is_running: Arc<AtomicBool>,
     // notification_tx will be used for WebSocket broadcasts in future
     // notification_tx: Option<broadcast::Sender<WsMessage>>,
@@ -423,10 +471,23 @@ impl AutoTrader {
             solana_client.clone(),
             config.clone(),
         )); // Corrected syntax: Ensure this parenthesis closes Arc::new
-        
+
+        // Initialize SimulationManager if dry_run_mode is enabled
+        let simulation_manager = if config.dry_run_mode {
+            info!("🔍 [DRY RUN] Mode enabled - trades will be simulated, not executed");
+            let sim_mgr = Arc::new(SimulationManager::new(birdeye_client.clone()));
+            // Load existing simulated positions
+            if let Err(e) = sim_mgr.load().await {
+                warn!("Failed to load simulated positions: {}", e);
+            }
+            Some(sim_mgr)
+        } else {
+            None
+        };
+
         // Set the default path for strategy persistence
         let strategies_path = PathBuf::from("data/strategies.json");
-        
+
         // Create AutoTrader instance
         let autotrader = Self {
             wallet_manager,
@@ -437,6 +498,7 @@ impl AutoTrader {
             config,
             position_manager,
             risk_analyzer,
+            simulation_manager,
             is_running: Arc::new(AtomicBool::new(false)),
             strategies: Arc::new(RwLock::new(HashMap::new())), // Start with empty map, will load in init
             running: Arc::new(RwLock::new(false)),
@@ -658,16 +720,18 @@ impl AutoTrader {
         let config = self.config.clone();
         let wallet_manager = self.wallet_manager.clone();
         let jupiter_client = self.jupiter_client.clone();
+        let simulation_manager = self.simulation_manager.clone();
         // Need solana_client too for RiskAnalyzer/PositionManager potentially
         // solana_client is used implicitly by other components
 
 
         let handle = tokio::spawn(async move {
             // Main scanning loop
-            let mut interval = interval(Duration::from_secs(60)); // Scan every 60 seconds
+            let mut scan_interval = interval(Duration::from_secs(60)); // Scan every 60 seconds
+            let mut price_update_counter: u32 = 0;
 
             loop {
-                interval.tick().await;
+                scan_interval.tick().await;
 
                 // Check if we should stop
                 if !*running_flag.read().await {
@@ -684,9 +748,44 @@ impl AutoTrader {
                     config.clone(),
                     wallet_manager.clone(),
                     jupiter_client.clone(),
+                    simulation_manager.clone(),
                 ).await {
                     error!("Error in scan cycle: {:?}", e);
                     // Continue running even if one cycle fails
+                }
+
+                // In dry run mode, update prices and check exit conditions every 5 scan cycles
+                if config.dry_run_mode {
+                    price_update_counter += 1;
+                    if price_update_counter >= 5 {
+                        price_update_counter = 0;
+                        if let Some(ref sim_mgr) = simulation_manager {
+                            // Update prices for all open simulated positions
+                            if let Err(e) = sim_mgr.update_prices().await {
+                                warn!("🔍 [DRY RUN] Failed to update simulated prices: {}", e);
+                            }
+
+                            // Check exit conditions using default strategy settings
+                            let stop_loss = config.default_stop_loss_percent as f64;
+                            let take_profit = config.default_take_profit_percent as f64;
+                            let trailing_stop = Some(config.default_trailing_stop_percent as f64);
+                            let max_hold = Some(config.max_hold_time_minutes);
+
+                            match sim_mgr.check_exit_conditions(
+                                stop_loss,
+                                take_profit,
+                                trailing_stop,
+                                max_hold,
+                            ).await {
+                                Ok(closed) => {
+                                    if !closed.is_empty() {
+                                        info!("🔍 [DRY RUN] Closed {} simulated positions", closed.len());
+                                    }
+                                }
+                                Err(e) => warn!("🔍 [DRY RUN] Failed to check exit conditions: {}", e),
+                            }
+                        }
+                    }
                 }
             }
         });

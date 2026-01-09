@@ -523,6 +523,7 @@ pub async fn get_autotrader_status(
     Ok(Json(AutoTraderStatus {
         running,
         demo_mode: state.config.demo_mode,
+        dry_run_mode: state.config.dry_run_mode,
         active_strategies,
         active_positions: positions.len(),
     }))
@@ -1068,5 +1069,155 @@ pub async fn build_copy_transaction(
             estimated_fee: Some(fee),
             estimated_pnl: Some(pnl - fee),
         }))
+    }
+}
+
+// ============================================================================
+// Simulation (Dry Run Mode)
+// ============================================================================
+
+/// Get all simulated positions
+pub async fn get_simulated_positions(
+    State(state): State<AppState>,
+) -> Result<Json<SimulatedPositionsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+
+    let positions = match &auto_trader.simulation_manager {
+        Some(sim_mgr) => sim_mgr.get_positions().await,
+        None => vec![],
+    };
+
+    let total = positions.len();
+    let is_dry_run_mode = state.config.dry_run_mode;
+
+    Ok(Json(SimulatedPositionsResponse {
+        positions,
+        total,
+        dry_run_mode: is_dry_run_mode,
+    }))
+}
+
+/// Get only open simulated positions
+pub async fn get_open_simulated_positions(
+    State(state): State<AppState>,
+) -> Result<Json<SimulatedPositionsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+
+    let positions = match &auto_trader.simulation_manager {
+        Some(sim_mgr) => sim_mgr.get_open_positions().await,
+        None => vec![],
+    };
+
+    let total = positions.len();
+    let is_dry_run_mode = state.config.dry_run_mode;
+
+    Ok(Json(SimulatedPositionsResponse {
+        positions,
+        total,
+        dry_run_mode: is_dry_run_mode,
+    }))
+}
+
+/// Get simulation statistics
+pub async fn get_simulation_stats(
+    State(state): State<AppState>,
+) -> Result<Json<SimulationStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+
+    let stats = match &auto_trader.simulation_manager {
+        Some(sim_mgr) => sim_mgr.get_stats().await,
+        None => crate::models::SimulationStats::default(),
+    };
+
+    let is_dry_run_mode = state.config.dry_run_mode;
+
+    Ok(Json(SimulationStatsResponse {
+        stats,
+        dry_run_mode: is_dry_run_mode,
+    }))
+}
+
+/// Clear all simulated positions
+pub async fn clear_simulation(
+    State(state): State<AppState>,
+) -> Result<Json<SuccessResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+
+    match &auto_trader.simulation_manager {
+        Some(sim_mgr) => {
+            match sim_mgr.clear().await {
+                Ok(_) => {
+                    info!("Cleared all simulated positions via API");
+                    Ok(Json(SuccessResponse {
+                        success: true,
+                        message: "All simulated positions cleared".to_string(),
+                    }))
+                }
+                Err(e) => {
+                    error!("Failed to clear simulated positions: {}", e);
+                    Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Failed to clear simulated positions".to_string(),
+                            details: Some(e.to_string()),
+                        }),
+                    ))
+                }
+            }
+        }
+        None => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Simulation not enabled".to_string(),
+                details: Some("DRY_RUN_MODE is not enabled".to_string()),
+            }),
+        )),
+    }
+}
+
+/// Manually close a simulated position
+pub async fn close_simulated_position(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SuccessResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+
+    match &auto_trader.simulation_manager {
+        Some(sim_mgr) => {
+            match sim_mgr.close_position(&id).await {
+                Ok(pos) => {
+                    info!(
+                        "Manually closed simulated position {} - P&L: {:.2}%",
+                        pos.token_symbol,
+                        pos.realized_pnl_percent.unwrap_or(0.0)
+                    );
+                    Ok(Json(SuccessResponse {
+                        success: true,
+                        message: format!(
+                            "Position {} closed with P&L: {:.2}%",
+                            pos.token_symbol,
+                            pos.realized_pnl_percent.unwrap_or(0.0)
+                        ),
+                    }))
+                }
+                Err(e) => {
+                    error!("Failed to close simulated position {}: {}", id, e);
+                    Err((
+                        StatusCode::NOT_FOUND,
+                        Json(ErrorResponse {
+                            error: "Failed to close position".to_string(),
+                            details: Some(e.to_string()),
+                        }),
+                    ))
+                }
+            }
+        }
+        None => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Simulation not enabled".to_string(),
+                details: Some("DRY_RUN_MODE is not enabled".to_string()),
+            }),
+        )),
     }
 }
