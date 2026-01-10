@@ -16,6 +16,7 @@ An autonomous trading bot for Solana memecoins with advanced risk analysis, buil
 - 📈 **Strategy Configuration**: Define multiple trading strategies with distinct risk parameters, budget allocation, and entry/exit rules. (Persistence planned).
 - ⚙️ **Configuration**: Manage API keys, wallet details, and bot settings via a `.env` file.
 - 🧪 **Demo Mode**: Simulate trading logic without executing real transactions on the blockchain.
+- 🔍 **Dry Run Mode**: Scan real tokens and simulate trades with live price tracking - no actual execution.
 
 ## Setup
 
