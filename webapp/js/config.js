@@ -1,13 +1,17 @@
 /**
  * TraderTony V4 - Configuration
  * Environment-specific settings
+ * VERSION: 2025-01-10-v3
  */
 
-// API Base URL - Railway backend
-window.API_BASE_URL = window.API_BASE_URL || 'https://trader-tony.up.railway.app';
+// Force Railway backend URLs (not Vercel)
+window.API_BASE_URL = 'https://trader-tony.up.railway.app';
+window.WS_URL = 'wss://trader-tony.up.railway.app/ws';
 
-// WebSocket URL - Railway backend
-window.WS_URL = window.WS_URL || 'wss://trader-tony.up.railway.app/ws';
+console.log('[Config] VERSION: 2025-01-10-v3');
+console.log('[Config] API_BASE_URL:', window.API_BASE_URL);
+
+// WebSocket URL is set above - Railway backend only
 
 // Feature flags
 window.FEATURES = {
