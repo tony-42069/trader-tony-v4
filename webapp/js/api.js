@@ -25,6 +25,8 @@ const API = {
         }
 
         console.log(`[API] Initialized with base URL: ${this.baseUrl}`);
+        console.log(`[API] Window API_BASE_URL: ${window.API_BASE_URL}`);
+        console.log(`[API] Hostname: ${window.location.hostname}`);
     },
 
     /**

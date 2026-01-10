@@ -72,7 +72,9 @@ const App = {
             // Load initial data
             await this.loadAllData();
         } catch (error) {
-            console.warn('[App] Backend not available, switching to demo mode:', error.message);
+            console.error('[App] Backend connection FAILED:', error);
+            console.error('[App] Error message:', error.message);
+            console.error('[App] Tried to connect to:', API.baseUrl);
 
             // Enable demo mode
             this.enableDemoMode();
