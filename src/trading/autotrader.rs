@@ -720,6 +720,16 @@ impl AutoTrader {
         // Assuming it takes Arc<Self> based on previous implementation attempt
         self.position_manager.clone().start_monitoring().await?;
 
+        // Initialize and start Pump.fun discovery in dry run mode
+        if self.config.dry_run_mode {
+            info!("🔍 [DRY RUN] Initializing Pump.fun real-time discovery...");
+            if let Err(e) = self.init_pumpfun_discovery().await {
+                warn!("Failed to initialize Pump.fun discovery: {:?}", e);
+            } else if let Err(e) = self.start_pumpfun_discovery().await {
+                warn!("Failed to start Pump.fun discovery: {:?}", e);
+            }
+        }
+
         // Set running flag to true
         *running_guard = true;
         // Drop the write guard before spawning the task
