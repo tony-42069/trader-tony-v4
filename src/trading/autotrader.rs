@@ -569,8 +569,50 @@ impl AutoTrader {
         // Update the in-memory HashMap
         let mut strategies = self.strategies.write().await;
         *strategies = loaded_strategies;
-        
-        info!("Loaded {} strategies", strategies.len());
+
+        // If no strategies loaded, create a default one for Pump.fun discovery
+        if strategies.is_empty() {
+            info!("📋 No strategies found - creating default 'Pump.fun Scout' strategy...");
+
+            let default_strategy = Strategy {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Pump.fun Scout".to_string(),
+                enabled: true,
+                max_concurrent_positions: 5,
+                max_position_size_sol: 0.1,
+                total_budget_sol: 1.0,
+                stop_loss_percent: Some(20),
+                take_profit_percent: Some(50),
+                trailing_stop_percent: Some(10),
+                max_hold_time_minutes: 60,
+                min_liquidity_sol: 1,
+                max_risk_level: 70,
+                min_holders: 1,
+                max_token_age_minutes: 30,
+                require_lp_burned: false,
+                reject_if_mint_authority: false,
+                reject_if_freeze_authority: false,
+                require_can_sell: false,
+                max_transfer_tax_percent: Some(5.0),
+                max_concentration_percent: Some(90.0),
+                slippage_bps: None,
+                priority_fee_micro_lamports: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+
+            strategies.insert(default_strategy.id.clone(), default_strategy);
+            info!("✅ Default 'Pump.fun Scout' strategy created and enabled");
+
+            // Save the default strategy to disk
+            drop(strategies); // Release lock before saving
+            if let Err(e) = self.save_strategies().await {
+                warn!("Failed to save default strategy to disk: {}", e);
+            }
+        } else {
+            info!("Loaded {} strategies", strategies.len());
+        }
+
         Ok(())
     }
     
