@@ -214,22 +214,41 @@ pub fn get_pumpswap_program_id() -> Pubkey {
 /// - Borsh deserialization fails
 pub fn parse_create_event(base64_data: &str) -> Option<PumpCreateEvent> {
     use base64::{engine::general_purpose::STANDARD, Engine};
+    use tracing::{debug, warn};
 
     // Decode base64
-    let data = STANDARD.decode(base64_data).ok()?;
+    let data = match STANDARD.decode(base64_data) {
+        Ok(d) => d,
+        Err(e) => {
+            debug!("Failed to decode base64: {:?}", e);
+            return None;
+        }
+    };
 
     // Must have at least 8 bytes for discriminator
     if data.len() <= 8 {
+        debug!("Data too short: {} bytes", data.len());
         return None;
     }
 
     // Validate discriminator FIRST (before attempting deserialization)
     if data[0..8] != CREATE_DISCRIMINATOR {
-        return None; // Not a Create event, skip silently
+        // Not a Create event - this is expected for Buy/Sell/other events
+        // Only log at debug level since this is very common
+        return None;
     }
 
+    // Found a Create event! Log the discriminator match
+    debug!("✅ Create discriminator matched! Attempting deserialization...");
+
     // Deserialize the rest (skip discriminator)
-    PumpCreateEvent::try_from_slice(&data[8..]).ok()
+    match PumpCreateEvent::try_from_slice(&data[8..]) {
+        Ok(event) => Some(event),
+        Err(e) => {
+            warn!("⚠️ Create discriminator matched but Borsh deserialization failed: {:?}", e);
+            None
+        }
+    }
 }
 
 // ============================================================================

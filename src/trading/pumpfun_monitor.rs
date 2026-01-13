@@ -279,19 +279,28 @@ impl PumpfunMonitor {
         let logs = &log_response.logs;
         let signature = &log_response.signature;
 
+        // Log every 100th transaction to show we're receiving data
+        {
+            let s = stats.read().await;
+            if s.logs_received % 100 == 1 {
+                info!("📡 WebSocket active: received {} logs so far", s.logs_received);
+            }
+        }
+
         // Look for "Instruction: Create" log to identify token creation
         let mut is_create_instruction = false;
 
         for log in logs {
-            // Detect create instruction
-            if log.contains("Program log: Instruction: Create") {
+            // Detect create instruction - check multiple patterns
+            if log.contains("Instruction: Create") {
                 is_create_instruction = true;
-                debug!("Found Create instruction in tx: {}", signature);
+                info!("🔎 Found Create instruction in tx: {}", signature);
             }
 
             // Extract event data (only if we're in a Create context)
             if is_create_instruction && log.starts_with("Program data: ") {
                 let base64_data = log.trim_start_matches("Program data: ");
+                info!("📦 Processing Program data ({} bytes encoded)", base64_data.len());
 
                 match parse_create_event(base64_data) {
                     Some(event) => {
