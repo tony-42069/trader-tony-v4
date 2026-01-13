@@ -1,25 +1,30 @@
 use anyhow::{anyhow, Context, Result};
+use borsh::BorshDeserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::str::FromStr;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::interval;
 use chrono::Utc;
-use tracing::{debug, error, info, warn}; // Added debug
+use tracing::{debug, error, info, warn};
+use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 
-use crate::api::birdeye::BirdeyeClient; // Add BirdeyeClient import
+use crate::api::birdeye::BirdeyeClient;
 use crate::api::helius::HeliusClient;
 use crate::api::jupiter::{JupiterClient, SwapResult};
 use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
 use crate::config::Config;
-use crate::trading::position::PositionManager; // Assuming these exist
-use crate::trading::risk::{RiskAnalysis, RiskAnalyzer}; // Assuming these exist
+use crate::trading::position::PositionManager;
+use crate::trading::risk::{RiskAnalysis, RiskAnalyzer};
 use crate::trading::strategy::Strategy;
 use crate::trading::simulation::SimulationManager;
+use crate::trading::pumpfun::{PumpfunToken, BondingCurveState};
+use crate::trading::pumpfun_monitor::PumpfunMonitor;
+use crate::trading::graduation_monitor::{GraduationMonitor, GraduationEvent};
 use crate::models::token::TokenMetadata;
 use solana_sdk::signature::Signature;
 use solana_sdk::pubkey::Pubkey;
@@ -440,6 +445,12 @@ pub struct AutoTrader {
     running: Arc<RwLock<bool>>, // Use Arc<RwLock<..>>
     task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     strategies_path: PathBuf,
+
+    // Pump.fun real-time discovery (for DRY_RUN_MODE)
+    pumpfun_token_rx: Arc<Mutex<Option<mpsc::Receiver<PumpfunToken>>>>,
+    graduation_rx: Arc<Mutex<Option<mpsc::Receiver<GraduationEvent>>>>,
+    pumpfun_monitor: Arc<Mutex<Option<PumpfunMonitor>>>,
+    graduation_monitor: Arc<Mutex<Option<GraduationMonitor>>>,
 }
 
 impl AutoTrader {
@@ -504,6 +515,11 @@ impl AutoTrader {
             running: Arc::new(RwLock::new(false)),
             task_handle: Arc::new(Mutex::new(None)),
             strategies_path,
+            // Pump.fun discovery initialized to None - will be set up in init_pumpfun_discovery()
+            pumpfun_token_rx: Arc::new(Mutex::new(None)),
+            graduation_rx: Arc::new(Mutex::new(None)),
+            pumpfun_monitor: Arc::new(Mutex::new(None)),
+            graduation_monitor: Arc::new(Mutex::new(None)),
         };
         
         // Initialize by loading strategies - use await directly since we're in an async function
@@ -725,64 +741,121 @@ impl AutoTrader {
         // solana_client is used implicitly by other components
 
 
+        // Take the Pump.fun token receiver for use in the task (if in dry run mode)
+        let pumpfun_token_rx = if config.dry_run_mode {
+            let mut rx_guard = self.pumpfun_token_rx.lock().await;
+            rx_guard.take()
+        } else {
+            None
+        };
+
+        // Clone config API key for RPC client in token processing
+        let helius_api_key = config.helius_api_key.clone();
+
         let handle = tokio::spawn(async move {
             // Main scanning loop
             let mut scan_interval = interval(Duration::from_secs(60)); // Scan every 60 seconds
             let mut price_update_counter: u32 = 0;
 
-            loop {
-                scan_interval.tick().await;
+            // Create RPC client for Pump.fun token processing
+            let rpc_client = if config.dry_run_mode {
+                Some(SolanaRpcClient::new(format!(
+                    "https://mainnet.helius-rpc.com/?api-key={}",
+                    helius_api_key
+                )))
+            } else {
+                None
+            };
 
+            // Wrap the receiver in an Option so we can use it in the select!
+            let mut token_rx = pumpfun_token_rx;
+
+            loop {
                 // Check if we should stop
                 if !*running_flag.read().await {
                     info!("AutoTrader scanning task stopped.");
                     break;
                 }
 
-                // Run the scan cycle
-                if let Err(e) = run_scan_cycle(
-                    strategies.clone(),
-                    helius_client.clone(),
-                    risk_analyzer.clone(),
-                    position_manager.clone(),
-                    config.clone(),
-                    wallet_manager.clone(),
-                    jupiter_client.clone(),
-                    simulation_manager.clone(),
-                ).await {
-                    error!("Error in scan cycle: {:?}", e);
-                    // Continue running even if one cycle fails
-                }
+                // Use tokio::select! to handle both timer events and incoming tokens
+                tokio::select! {
+                    // Handle Pump.fun token discovery (dry run mode only)
+                    token = async {
+                        if let Some(ref mut rx) = token_rx {
+                            rx.recv().await
+                        } else {
+                            // If no receiver, wait forever (this branch won't be selected)
+                            std::future::pending::<Option<PumpfunToken>>().await
+                        }
+                    } => {
+                        if let Some(token) = token {
+                            // Process the discovered token
+                            if let (Some(ref sim_mgr), Some(ref rpc)) = (&simulation_manager, &rpc_client) {
+                                let enabled_strategies: Vec<Strategy> = {
+                                    let strats = strategies.read().await;
+                                    strats.values().filter(|s| s.enabled).cloned().collect()
+                                };
 
-                // In dry run mode, update prices and check exit conditions every 5 scan cycles
-                if config.dry_run_mode {
-                    price_update_counter += 1;
-                    if price_update_counter >= 5 {
-                        price_update_counter = 0;
-                        if let Some(ref sim_mgr) = simulation_manager {
-                            // Update prices for all open simulated positions
-                            if let Err(e) = sim_mgr.update_prices().await {
-                                warn!("🔍 [DRY RUN] Failed to update simulated prices: {}", e);
+                                if let Err(e) = AutoTrader::process_pumpfun_token(
+                                    &token,
+                                    &enabled_strategies,
+                                    sim_mgr,
+                                    rpc,
+                                ).await {
+                                    warn!("Error processing Pump.fun token {}: {:?}", token.symbol, e);
+                                }
                             }
+                        }
+                    }
 
-                            // Check exit conditions using default strategy settings
-                            let stop_loss = config.default_stop_loss_percent as f64;
-                            let take_profit = config.default_take_profit_percent as f64;
-                            let trailing_stop = Some(config.default_trailing_stop_percent as f64);
-                            let max_hold = Some(config.max_hold_time_minutes);
+                    // Regular scan cycle timer
+                    _ = scan_interval.tick() => {
+                        // Run the regular scan cycle (still uses Helius DAS for non-Pump.fun tokens)
+                        if let Err(e) = run_scan_cycle(
+                            strategies.clone(),
+                            helius_client.clone(),
+                            risk_analyzer.clone(),
+                            position_manager.clone(),
+                            config.clone(),
+                            wallet_manager.clone(),
+                            jupiter_client.clone(),
+                            simulation_manager.clone(),
+                        ).await {
+                            error!("Error in scan cycle: {:?}", e);
+                            // Continue running even if one cycle fails
+                        }
 
-                            match sim_mgr.check_exit_conditions(
-                                stop_loss,
-                                take_profit,
-                                trailing_stop,
-                                max_hold,
-                            ).await {
-                                Ok(closed) => {
-                                    if !closed.is_empty() {
-                                        info!("🔍 [DRY RUN] Closed {} simulated positions", closed.len());
+                        // In dry run mode, update prices and check exit conditions every 5 scan cycles
+                        if config.dry_run_mode {
+                            price_update_counter += 1;
+                            if price_update_counter >= 5 {
+                                price_update_counter = 0;
+                                if let Some(ref sim_mgr) = simulation_manager {
+                                    // Update prices for all open simulated positions
+                                    if let Err(e) = sim_mgr.update_prices().await {
+                                        warn!("🔍 [DRY RUN] Failed to update simulated prices: {}", e);
+                                    }
+
+                                    // Check exit conditions using default strategy settings
+                                    let stop_loss = config.default_stop_loss_percent as f64;
+                                    let take_profit = config.default_take_profit_percent as f64;
+                                    let trailing_stop = Some(config.default_trailing_stop_percent as f64);
+                                    let max_hold = Some(config.max_hold_time_minutes);
+
+                                    match sim_mgr.check_exit_conditions(
+                                        stop_loss,
+                                        take_profit,
+                                        trailing_stop,
+                                        max_hold,
+                                    ).await {
+                                        Ok(closed) => {
+                                            if !closed.is_empty() {
+                                                info!("🔍 [DRY RUN] Closed {} simulated positions", closed.len());
+                                            }
+                                        }
+                                        Err(e) => warn!("🔍 [DRY RUN] Failed to check exit conditions: {}", e),
                                     }
                                 }
-                                Err(e) => warn!("🔍 [DRY RUN] Failed to check exit conditions: {}", e),
                             }
                         }
                     }
@@ -804,6 +877,13 @@ impl AutoTrader {
         let mut running_guard = self.running.write().await;
         *running_guard = false;
         drop(running_guard);
+
+        // Stop Pump.fun monitors if running
+        if self.config.dry_run_mode {
+            if let Err(e) = self.stop_pumpfun_discovery().await {
+                warn!("Error stopping Pump.fun discovery: {:?}", e);
+            }
+        }
 
         // Wait for the task to finish
         let mut task_handle_guard = self.task_handle.lock().await;
@@ -938,6 +1018,232 @@ impl AutoTrader {
         }
     }
 
+    // =========================================================================
+    // PUMP.FUN REAL-TIME DISCOVERY (for DRY_RUN_MODE)
+    // =========================================================================
+
+    /// Initialize Pump.fun real-time token discovery.
+    /// This sets up the WebSocket monitor and graduation tracker.
+    /// Call this before start() when using DRY_RUN_MODE.
+    pub async fn init_pumpfun_discovery(&self) -> Result<()> {
+        if !self.config.dry_run_mode {
+            info!("Pump.fun discovery is only available in DRY_RUN_MODE");
+            return Ok(());
+        }
+
+        info!("🚀 Initializing Pump.fun real-time discovery...");
+
+        // Create channels for token discovery and graduation events
+        let (token_tx, token_rx) = mpsc::channel::<PumpfunToken>(100);
+        let (graduation_tx, graduation_rx) = mpsc::channel::<GraduationEvent>(50);
+
+        // Create channel for token flow: PumpfunMonitor -> GraduationMonitor
+        let (_token_for_grad_tx, token_for_grad_rx) = mpsc::channel::<PumpfunToken>(100);
+
+        // Create the Pump.fun monitor
+        let pumpfun_monitor = PumpfunMonitor::new(
+            &self.config.helius_api_key,
+            token_tx,
+        );
+
+        // Build RPC URL for graduation monitor
+        let rpc_url = format!("https://mainnet.helius-rpc.com/?api-key={}", self.config.helius_api_key);
+
+        // Create the graduation monitor
+        let graduation_monitor = GraduationMonitor::new(
+            &rpc_url,
+            token_for_grad_rx,
+            graduation_tx,
+        );
+
+        // Store the monitors and receivers
+        {
+            let mut monitor_guard = self.pumpfun_monitor.lock().await;
+            *monitor_guard = Some(pumpfun_monitor);
+        }
+        {
+            let mut grad_monitor_guard = self.graduation_monitor.lock().await;
+            *grad_monitor_guard = Some(graduation_monitor);
+        }
+        {
+            let mut token_rx_guard = self.pumpfun_token_rx.lock().await;
+            *token_rx_guard = Some(token_rx);
+        }
+        {
+            let mut grad_rx_guard = self.graduation_rx.lock().await;
+            *grad_rx_guard = Some(graduation_rx);
+        }
+
+        info!("✅ Pump.fun discovery initialized");
+        Ok(())
+    }
+
+    /// Start the Pump.fun monitors (call after init_pumpfun_discovery and start).
+    pub async fn start_pumpfun_discovery(&self) -> Result<()> {
+        if !self.config.dry_run_mode {
+            return Ok(());
+        }
+
+        info!("🎯 Starting Pump.fun real-time monitors...");
+
+        // Start Pump.fun monitor
+        {
+            let monitor_guard = self.pumpfun_monitor.lock().await;
+            if let Some(ref monitor) = *monitor_guard {
+                monitor.start().await?;
+                info!("✅ Pump.fun WebSocket monitor started");
+            }
+        }
+
+        // Start graduation monitor
+        {
+            let grad_monitor_guard = self.graduation_monitor.lock().await;
+            if let Some(ref monitor) = *grad_monitor_guard {
+                monitor.start().await?;
+                info!("✅ Graduation monitor started");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Stop the Pump.fun monitors.
+    pub async fn stop_pumpfun_discovery(&self) -> Result<()> {
+        info!("Stopping Pump.fun monitors...");
+
+        // Stop Pump.fun monitor
+        {
+            let monitor_guard = self.pumpfun_monitor.lock().await;
+            if let Some(ref monitor) = *monitor_guard {
+                monitor.stop().await?;
+            }
+        }
+
+        // Stop graduation monitor
+        {
+            let grad_monitor_guard = self.graduation_monitor.lock().await;
+            if let Some(ref monitor) = *grad_monitor_guard {
+                monitor.stop().await?;
+            }
+        }
+
+        info!("Pump.fun monitors stopped");
+        Ok(())
+    }
+
+    /// Process a discovered Pump.fun token.
+    /// Evaluates the token against enabled strategies and simulates buys if criteria are met.
+    async fn process_pumpfun_token(
+        token: &PumpfunToken,
+        strategies: &[Strategy],
+        simulation_manager: &SimulationManager,
+        rpc_client: &solana_client::nonblocking::rpc_client::RpcClient,
+    ) -> Result<()> {
+        info!("🔍 Processing Pump.fun token: {} ({})", token.symbol, token.mint);
+
+        // Skip if bonding curve is already complete
+        if token.is_graduated {
+            debug!("Token {} already graduated, skipping", token.symbol);
+            return Ok(());
+        }
+
+        // Fetch bonding curve state for risk analysis
+        let bonding_curve_pubkey = match Pubkey::from_str(&token.bonding_curve) {
+            Ok(pk) => pk,
+            Err(e) => {
+                warn!("Invalid bonding curve address for {}: {:?}", token.symbol, e);
+                return Ok(());
+            }
+        };
+
+        // Try to get bonding curve state
+        let (progress, price_sol, liquidity_sol) = match rpc_client.get_account(&bonding_curve_pubkey).await {
+            Ok(account) => {
+                if account.data.len() > 8 {
+                    let data = &account.data[8..]; // Skip Anchor discriminator
+                    match BondingCurveState::try_from_slice(data) {
+                        Ok(state) => {
+                            (state.get_progress_percent(), state.get_price_sol(), state.get_liquidity_sol())
+                        }
+                        Err(_) => (0.0, 0.0, 0.0)
+                    }
+                } else {
+                    (0.0, 0.0, 0.0)
+                }
+            }
+            Err(e) => {
+                debug!("Failed to fetch bonding curve for {}: {:?}", token.symbol, e);
+                (0.0, 0.0, 0.0)
+            }
+        };
+
+        info!("   Progress: {:.1}%, Price: {:.10} SOL, Liquidity: {:.2} SOL",
+            progress, price_sol, liquidity_sol);
+
+        // Calculate risk score based on bonding curve state
+        // Lower progress = higher risk (more volatile), very low liquidity = higher risk
+        let risk_score = calculate_pumpfun_risk_score(progress, liquidity_sol);
+        info!("   Risk Score: {}/100", risk_score);
+
+        // Check against each enabled strategy
+        for strategy in strategies {
+            if !strategy.enabled {
+                continue;
+            }
+
+            // Check if token meets strategy criteria
+            let meets_criteria =
+                risk_score <= strategy.max_risk_level &&
+                liquidity_sol >= strategy.min_liquidity_sol as f64;
+
+            if meets_criteria {
+                info!("✅ [CANDIDATE] {} meets criteria for strategy '{}' - Risk: {}/100, Liquidity: {:.2} SOL",
+                    token.symbol, strategy.name, risk_score, liquidity_sol);
+
+                // Check if we already have a simulated position
+                if !simulation_manager.has_open_position(&token.mint).await {
+                    // Simulate the buy
+                    let entry_reason = format!(
+                        "Pump.fun discovery - Progress: {:.1}%, Strategy: '{}'",
+                        progress, strategy.name
+                    );
+
+                    match simulation_manager.simulate_buy(
+                        &token.mint,
+                        &token.symbol,
+                        &token.name,
+                        price_sol,
+                        strategy.max_position_size_sol,
+                        risk_score,
+                        vec![
+                            format!("Bonding progress: {:.1}%", progress),
+                            format!("Liquidity: {:.2} SOL", liquidity_sol),
+                            format!("Price: {:.10} SOL", price_sol),
+                        ],
+                        entry_reason,
+                        strategy.id.clone(),
+                    ).await {
+                        Ok(_) => info!("🔍 [DRY RUN] Simulated buy for {} via strategy '{}'", token.symbol, strategy.name),
+                        Err(e) => warn!("🔍 [DRY RUN] Failed to simulate buy for {}: {:?}", token.symbol, e),
+                    }
+                } else {
+                    debug!("Already have simulated position for {}", token.symbol);
+                }
+            } else {
+                // Log why it was rejected
+                if risk_score > strategy.max_risk_level {
+                    debug!("❌ {} rejected - Risk too high: {}/100 (max: {})",
+                        token.symbol, risk_score, strategy.max_risk_level);
+                } else if liquidity_sol < strategy.min_liquidity_sol as f64 {
+                    debug!("❌ {} rejected - Liquidity too low: {:.2} SOL (min: {})",
+                        token.symbol, liquidity_sol, strategy.min_liquidity_sol);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Gets performance statistics for the trading bot
     pub async fn get_performance_stats(&self) -> Result<PerformanceStats> {
         let positions = self.position_manager.get_all_positions().await;
@@ -991,4 +1297,44 @@ pub struct PerformanceStats {
     pub win_rate: f64,
     pub avg_roi: f64,
     pub total_entry_value: f64,
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Calculate risk score for a Pump.fun token based on bonding curve state.
+/// Returns a score from 0-100 where higher = more risky.
+fn calculate_pumpfun_risk_score(progress_percent: f64, liquidity_sol: f64) -> u32 {
+    let mut risk_score: f64 = 50.0; // Start at moderate risk
+
+    // Progress-based risk: Very new tokens (< 10%) are highest risk
+    // Tokens close to graduation (> 80%) are lower risk
+    if progress_percent < 5.0 {
+        risk_score += 30.0; // Very early = very risky
+    } else if progress_percent < 10.0 {
+        risk_score += 20.0;
+    } else if progress_percent < 25.0 {
+        risk_score += 10.0;
+    } else if progress_percent > 80.0 {
+        risk_score -= 20.0; // Near graduation = lower risk
+    } else if progress_percent > 50.0 {
+        risk_score -= 10.0;
+    }
+
+    // Liquidity-based risk: More liquidity = lower risk
+    if liquidity_sol < 1.0 {
+        risk_score += 25.0; // Very low liquidity
+    } else if liquidity_sol < 5.0 {
+        risk_score += 15.0;
+    } else if liquidity_sol < 10.0 {
+        risk_score += 5.0;
+    } else if liquidity_sol > 50.0 {
+        risk_score -= 15.0; // High liquidity = lower risk
+    } else if liquidity_sol > 25.0 {
+        risk_score -= 10.0;
+    }
+
+    // Clamp to 0-100 range
+    risk_score.clamp(0.0, 100.0) as u32
 }
