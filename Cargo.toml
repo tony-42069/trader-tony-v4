@@ -36,6 +36,7 @@ reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.21" # Needed for base64 decoding
+borsh = "0.10" # For Pump.fun event deserialization (derive is included by default)
 
 # Configuration
 config = "0.13"
