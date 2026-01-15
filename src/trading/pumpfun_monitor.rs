@@ -287,49 +287,68 @@ impl PumpfunMonitor {
             }
         }
 
-        // Look for "Instruction: Create" log to identify token creation
+        // Look for "Instruction: Create" or "Instruction: CreateV2" log to identify token creation
         let mut is_create_instruction = false;
 
         for log in logs {
-            // Detect create instruction - check multiple patterns
-            if log.contains("Instruction: Create") {
+            // Detect create instruction - check both legacy "Create" and current "CreateV2"
+            if log.contains("Instruction: Create") || log.contains("Instruction: CreateV2") {
                 is_create_instruction = true;
                 info!("🔎 Found Create instruction in tx: {}", signature);
             }
 
             // Extract event data (only if we're in a Create context)
+            // Also check base64 prefix "G3KpTd7r" which is the start of our discriminator
             if is_create_instruction && log.starts_with("Program data: ") {
                 let base64_data = log.trim_start_matches("Program data: ");
+
+                // Quick filter: CreateEvent base64 starts with "G3KpTd7r" (discriminator prefix)
+                // This skips other events (Buy, Sell, etc.) without full decode
+                if !base64_data.starts_with("G3KpTd7r") {
+                    continue;
+                }
+
                 info!("📦 Processing Program data ({} bytes encoded)", base64_data.len());
 
                 match parse_create_event(base64_data) {
                     Some(event) => {
                         info!("🚀 NEW PUMP.FUN TOKEN DISCOVERED!");
+                        info!("   Name: {} ({})", event.name, event.symbol);
                         info!("   Mint: {}", event.mint);
-                        info!("   Name: {}", event.name);
-                        info!("   Symbol: {}", event.symbol);
-                        info!("   Creator: {}", event.user);
                         info!("   Bonding Curve: {}", event.bonding_curve);
+                        info!("   Creator: {}", event.creator);
+                        info!("   Virtual Reserves: {} tokens / {} SOL",
+                            event.virtual_token_reserves / 1_000_000,
+                            event.virtual_sol_reserves / 1_000_000_000);
+                        info!("   Mayhem Mode: {}", event.is_mayhem_mode);
                         info!("   TX: {}", signature);
 
                         // Derive the bonding curve ATA
                         let bonding_curve_ata =
                             derive_bonding_curve_ata(&event.bonding_curve, &event.mint);
 
+                        // Calculate initial price from virtual reserves
+                        let initial_price_sol = if event.virtual_token_reserves > 0 {
+                            (event.virtual_sol_reserves as f64 / 1_000_000_000.0) /
+                            (event.virtual_token_reserves as f64 / 1_000_000.0)
+                        } else {
+                            0.0
+                        };
+
                         let token = PumpfunToken {
                             mint: event.mint.to_string(),
                             name: event.name,
                             symbol: event.symbol,
                             uri: event.uri,
-                            creator: event.user.to_string(),
+                            creator: event.creator.to_string(), // Use creator field, not user
                             bonding_curve: event.bonding_curve.to_string(),
                             bonding_curve_ata: bonding_curve_ata.to_string(),
-                            discovered_at: chrono::Utc::now().timestamp(),
+                            discovered_at: event.timestamp, // Use event timestamp instead of current time
                             creation_signature: signature.clone(),
                             is_graduated: false,
                             bonding_progress: 0.0,
-                            price_sol: 0.0,      // Will be updated from bonding curve state
-                            liquidity_sol: 0.0,  // Will be updated from bonding curve state
+                            price_sol: initial_price_sol,  // Set initial price from event
+                            liquidity_sol: 0.0,            // No real SOL yet at creation
                         };
 
                         // Update stats

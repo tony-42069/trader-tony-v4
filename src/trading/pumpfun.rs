@@ -25,9 +25,10 @@ pub const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 /// Bonding curve seed for PDA derivation
 pub const BONDING_CURVE_SEED: &[u8] = b"bonding-curve";
 
-/// Create instruction discriminator (first 8 bytes of event data)
+/// CreateEvent discriminator (first 8 bytes of event data)
+/// Derived from sha256("event:createEvent")[0..8] - note lowercase 'c'!
 /// Used to identify PumpCreateEvent vs other events (Buy, Sell, etc.)
-pub const CREATE_DISCRIMINATOR: [u8; 8] = [24, 30, 200, 40, 5, 28, 7, 119];
+pub const CREATE_DISCRIMINATOR: [u8; 8] = [27, 114, 169, 77, 222, 235, 99, 118];
 
 /// Default token decimals for Pump.fun tokens
 pub const DEFAULT_DECIMALS: u8 = 6;
@@ -48,25 +49,54 @@ pub const GRADUATION_THRESHOLD_LAMPORTS: u64 = 85_000_000_000;
 // EVENT STRUCTURES
 // ============================================================================
 
-/// The event emitted by Pump.fun when a new token is created.
+/// The event emitted by Pump.fun when a new token is created (CreateV2 instruction).
 /// This is parsed from the "Program data:" log line.
 ///
-/// IMPORTANT: Skip the first 8 bytes (Anchor event discriminator) before deserializing.
-/// Also validate that those 8 bytes match CREATE_DISCRIMINATOR.
+/// IMPORTANT:
+/// - Skip the first 8 bytes (Anchor event discriminator) before deserializing
+/// - Validate that those 8 bytes match CREATE_DISCRIMINATOR
+/// - Field order matters! Strings come first, then pubkeys, then numbers, then bool
+///
+/// This struct has 14 fields total (confirmed from multiple research sources).
 #[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
 pub struct PumpCreateEvent {
+    // --- Strings FIRST (variable length: 4-byte len + UTF-8 data) ---
     /// Token name (e.g., "PEPE Coin")
     pub name: String,
     /// Token symbol (e.g., "PEPE")
     pub symbol: String,
-    /// Metadata URI (usually IPFS)
+    /// Metadata URI (usually IPFS or custom metadata service)
     pub uri: String,
+
+    // --- Pubkeys (32 bytes each) ---
     /// The SPL token mint address - THIS IS WHAT WE NEED FOR TRADING
     pub mint: Pubkey,
     /// The bonding curve PDA
     pub bonding_curve: Pubkey,
-    /// The creator (dev) wallet address
+    /// The user who initiated the creation (transaction signer)
     pub user: Pubkey,
+    /// The creator/dev wallet (often same as user)
+    pub creator: Pubkey,
+
+    // --- Numbers ---
+    /// Unix timestamp of creation
+    pub timestamp: i64,
+    /// Initial virtual token reserves on the bonding curve
+    pub virtual_token_reserves: u64,
+    /// Initial virtual SOL reserves on the bonding curve
+    pub virtual_sol_reserves: u64,
+    /// Initial real token reserves
+    pub real_token_reserves: u64,
+    /// Total token supply
+    pub token_total_supply: u64,
+
+    // --- More Pubkeys ---
+    /// Token program ID (usually Token-2022: TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb)
+    pub token_program: Pubkey,
+
+    // --- Bool ---
+    /// Whether this token was created in "Mayhem mode" (special fee handling)
+    pub is_mayhem_mode: bool,
 }
 
 // ============================================================================
@@ -348,6 +378,72 @@ mod tests {
         // Data with wrong discriminator should return None
         let wrong_disc = STANDARD.encode([0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         assert!(parse_create_event(&wrong_disc).is_none());
+    }
+
+    #[test]
+    fn test_parse_real_create_event() {
+        // Real CreateV2 event from Solscan transaction:
+        // vY3Ajg8wEiCtGbH8xq4LLhiNsAuZPTENMTwJzxV1umEVoxMyEUoRQwmjXbyVoRdGxTHQKJ9cjW5jMD2gBoPwUpB
+        // Token: "Taki" (Taki)
+        let base64_data = "G3KpTd7rY3YEAAAAVGFraQQAAABUYWtpPQAAAGh0dHBzOi8vbWV0YWRhdGEuajd0cmFja2VyLmNvbS9tZXRhZGF0YS9iYjJhMGU3MWQyMjY0YWExLmpzb27FzfVxmN9cMINqwLCtIJRsjIJ1mBztr19XIUhnY27h8Q541h90lcZyZJNdZagw3fOqOEJTYbADjV6h5gOEMCRPxuFvr2iDGWfai1Lz8///dd0FExKKlO3gUhIcYC78rqLG4W+vaIMZZ9qLUvPz//913QUTEoqU7eBSEhxgLvyuonl7ZmkAAAAAABDYR+PPAwAArCP8BgAAAAB4xftR0QIAAIDGpH6NAwAG3fbh7nWP3hhCXbzkbM3athr8TYO5DSf+vfko2KGL/AA=";
+
+        let event = parse_create_event(base64_data).expect("Should parse real CreateEvent successfully");
+
+        // Verify parsed values match expected data from Solscan
+        assert_eq!(event.name, "Taki");
+        assert_eq!(event.symbol, "Taki");
+        assert_eq!(event.uri, "https://metadata.j7tracker.com/metadata/bb2a0e71d2264aa1.json");
+
+        // Verify mint address
+        assert_eq!(
+            event.mint.to_string(),
+            "EK9U7T5GFoNjYg8R5eBzpu8fNR6DCxD7ggYrqamR8eBa"
+        );
+
+        // Verify bonding curve address
+        assert_eq!(
+            event.bonding_curve.to_string(),
+            "yVaR2kKvXEVVUQEqD7U7wZk7h47ePk3JvusmXz5uMgi"
+        );
+
+        // Verify user/creator
+        assert_eq!(
+            event.user.to_string(),
+            "EPM6sE3AFujbJigkWGkGB5aWdNzDUncUPFEG71QKYh8M"
+        );
+
+        // Verify timestamp (should be a reasonable Unix timestamp)
+        assert!(event.timestamp > 1700000000, "Timestamp should be after 2023");
+
+        // Verify reserves are reasonable values
+        assert!(event.virtual_token_reserves > 0, "Virtual token reserves should be positive");
+        assert!(event.virtual_sol_reserves > 0, "Virtual SOL reserves should be positive");
+
+        // Verify is_mayhem_mode is false for this token
+        assert_eq!(event.is_mayhem_mode, false);
+
+        println!("✅ Successfully parsed real CreateEvent:");
+        println!("   Name: {}", event.name);
+        println!("   Symbol: {}", event.symbol);
+        println!("   Mint: {}", event.mint);
+        println!("   Bonding Curve: {}", event.bonding_curve);
+        println!("   Timestamp: {}", event.timestamp);
+        println!("   Virtual Token Reserves: {}", event.virtual_token_reserves);
+        println!("   Virtual SOL Reserves: {}", event.virtual_sol_reserves);
+    }
+
+    #[test]
+    fn test_discriminator_value() {
+        // Verify our discriminator matches the expected bytes
+        // This is sha256("event:createEvent")[0..8]
+        assert_eq!(CREATE_DISCRIMINATOR[0], 27);   // 0x1b
+        assert_eq!(CREATE_DISCRIMINATOR[1], 114);  // 0x72
+        assert_eq!(CREATE_DISCRIMINATOR[2], 169);  // 0xa9
+        assert_eq!(CREATE_DISCRIMINATOR[3], 77);   // 0x4d
+        assert_eq!(CREATE_DISCRIMINATOR[4], 222);  // 0xde
+        assert_eq!(CREATE_DISCRIMINATOR[5], 235);  // 0xeb
+        assert_eq!(CREATE_DISCRIMINATOR[6], 99);   // 0x63
+        assert_eq!(CREATE_DISCRIMINATOR[7], 118);  // 0x76
     }
 
     #[test]
