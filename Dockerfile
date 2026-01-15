@@ -54,8 +54,8 @@ RUN mkdir -p /app/data
 # Copy the compiled binary from builder
 COPY --from=builder /app/target/release/trader-tony-v4 /app/trader-tony-v4
 
-# Expose the API port (Railway will set PORT env var)
-EXPOSE 3030
+# Expose default port (Railway will set PORT env var dynamically)
+EXPOSE 3000
 
 # Note: Railway uses its own health check (healthcheckPath in railway.toml)
 # Docker HEALTHCHECK removed as it requires curl which isn't in slim image
@@ -63,7 +63,7 @@ EXPOSE 3030
 # Default environment variables
 ENV RUST_LOG=info
 ENV API_HOST=0.0.0.0
-ENV API_PORT=3030
+# Note: Do NOT set API_PORT here - Railway sets PORT dynamically
 
 # Run the application
 CMD ["./trader-tony-v4"]
