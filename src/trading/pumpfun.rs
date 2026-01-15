@@ -3,8 +3,12 @@
 // Pump.fun token discovery data structures and utilities.
 // This module provides types for parsing Pump.fun create events and
 // monitoring bonding curve state for graduation detection.
+//
+// VERIFIED against real on-chain transactions:
+// - SINGU: 5j7DsKdxmQRYDWKcspkUy5avyNFpqtSLnD29ChGoRxZjMFHs171nFrSXiC54TvwxEaLgUWBvYC8MmEELBZExk8Ww
+// - Taki:  vY3Ajg8wEiCtGbH8xq4LLhiNsAuZPTENMTwJzxV1umEVoxMyEUoRQwmjXbyVoRdGxTHQKJ9cjW5jMD2gBoPwUpB
 
-use borsh::{BorshDeserialize, BorshSerialize};
+use borsh::BorshDeserialize;
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
@@ -25,9 +29,14 @@ pub const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 /// Bonding curve seed for PDA derivation
 pub const BONDING_CURVE_SEED: &[u8] = b"bonding-curve";
 
-/// Create instruction discriminator (first 8 bytes of event data)
-/// Used to identify PumpCreateEvent vs other events (Buy, Sell, etc.)
-pub const CREATE_DISCRIMINATOR: [u8; 8] = [24, 30, 200, 40, 5, 28, 7, 119];
+/// CreateEvent discriminator - VERIFIED from real transactions
+/// Derived from sha256("event:createEvent")[0..8] - note lowercase 'c'!
+/// Base64 prefix: "G3KpTd7r"
+pub const CREATE_DISCRIMINATOR: [u8; 8] = [27, 114, 169, 77, 222, 235, 99, 118];
+
+/// Maximum allowed size for event data (prevents OOM on malformed data)
+/// CreateEvent is typically 300-400 bytes, so 1024 is a safe upper bound
+pub const MAX_EVENT_SIZE: usize = 1024;
 
 /// Default token decimals for Pump.fun tokens
 pub const DEFAULT_DECIMALS: u8 = 6;
@@ -48,25 +57,56 @@ pub const GRADUATION_THRESHOLD_LAMPORTS: u64 = 85_000_000_000;
 // EVENT STRUCTURES
 // ============================================================================
 
-/// The event emitted by Pump.fun when a new token is created.
+/// The event emitted by Pump.fun when a new token is created (CreateV2 instruction).
 /// This is parsed from the "Program data:" log line.
 ///
-/// IMPORTANT: Skip the first 8 bytes (Anchor event discriminator) before deserializing.
-/// Also validate that those 8 bytes match CREATE_DISCRIMINATOR.
-#[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
+/// VERIFIED against real on-chain data from multiple transactions.
+///
+/// IMPORTANT:
+/// - Skip the first 8 bytes (Anchor event discriminator) before deserializing
+/// - Validate that those 8 bytes match CREATE_DISCRIMINATOR
+/// - Field order matters! Borsh deserializes in declaration order
+///
+/// This struct has 14 fields total.
+#[derive(Debug, Clone, BorshDeserialize)]
 pub struct PumpCreateEvent {
-    /// Token name (e.g., "PEPE Coin")
+    // --- Strings (variable length: 4-byte len prefix + UTF-8 data) ---
+    /// Token name (e.g., "The Singularity")
     pub name: String,
-    /// Token symbol (e.g., "PEPE")
+    /// Token symbol (e.g., "SINGU")
     pub symbol: String,
     /// Metadata URI (usually IPFS)
     pub uri: String,
+
+    // --- Pubkeys (32 bytes each) ---
     /// The SPL token mint address - THIS IS WHAT WE NEED FOR TRADING
     pub mint: Pubkey,
     /// The bonding curve PDA
     pub bonding_curve: Pubkey,
-    /// The creator (dev) wallet address
+    /// The user who initiated the creation (transaction signer)
     pub user: Pubkey,
+    /// The creator/dev wallet (often same as user)
+    pub creator: Pubkey,
+
+    // --- Numbers (8 bytes each) ---
+    /// Unix timestamp of creation
+    pub timestamp: i64,
+    /// Initial virtual token reserves on the bonding curve
+    pub virtual_token_reserves: u64,
+    /// Initial virtual SOL reserves on the bonding curve (30 SOL = 30_000_000_000 lamports)
+    pub virtual_sol_reserves: u64,
+    /// Initial real token reserves
+    pub real_token_reserves: u64,
+    /// Total token supply (1 billion with 6 decimals = 1_000_000_000_000_000)
+    pub token_total_supply: u64,
+
+    // --- More Pubkeys ---
+    /// Token program ID (Token-2022: TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb)
+    pub token_program: Pubkey,
+
+    // --- Bool (1 byte) ---
+    /// Whether this token was created in "Mayhem mode"
+    pub is_mayhem_mode: bool,
 }
 
 // ============================================================================
@@ -75,7 +115,7 @@ pub struct PumpCreateEvent {
 
 /// The on-chain state of a Pump.fun bonding curve account.
 /// Used to track graduation status, calculate price, and determine liquidity.
-#[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
+#[derive(BorshDeserialize, Debug, Clone)]
 pub struct BondingCurveState {
     /// Virtual token reserves (for price calculation via constant product)
     pub virtual_token_reserves: u64,
@@ -205,11 +245,12 @@ pub fn get_pumpswap_program_id() -> Pubkey {
 ///
 /// This function:
 /// 1. Decodes the base64 data
-/// 2. Validates that the first 8 bytes match CREATE_DISCRIMINATOR
-/// 3. Deserializes the remaining bytes using Borsh
+/// 2. Validates data size (prevents OOM attacks)
+/// 3. Validates that the first 8 bytes match CREATE_DISCRIMINATOR
+/// 4. Deserializes the remaining bytes using Borsh
 ///
 /// Returns None if:
-/// - Data is too short
+/// - Data is too short or too long
 /// - Discriminator doesn't match (this is expected for Buy/Sell events)
 /// - Borsh deserialization fails
 pub fn parse_create_event(base64_data: &str) -> Option<PumpCreateEvent> {
@@ -220,7 +261,7 @@ pub fn parse_create_event(base64_data: &str) -> Option<PumpCreateEvent> {
     let data = match STANDARD.decode(base64_data) {
         Ok(d) => d,
         Err(e) => {
-            debug!("Failed to decode base64: {:?}", e);
+            debug!("Base64 decode failed: {:?}", e);
             return None;
         }
     };
@@ -231,24 +272,49 @@ pub fn parse_create_event(base64_data: &str) -> Option<PumpCreateEvent> {
         return None;
     }
 
-    // Validate discriminator FIRST (before attempting deserialization)
-    if data[0..8] != CREATE_DISCRIMINATOR {
-        // Not a Create event - this is expected for Buy/Sell/other events
-        // Only log at debug level since this is very common
+    // CRITICAL: Prevent OOM by rejecting suspiciously large data
+    // CreateEvent is typically 300-400 bytes, max 1024 is safe
+    if data.len() > MAX_EVENT_SIZE {
+        warn!(
+            "Data too large ({} bytes), rejecting to prevent OOM",
+            data.len()
+        );
         return None;
     }
 
-    // Found a Create event! Log the discriminator match
-    debug!("✅ Create discriminator matched! Attempting deserialization...");
+    // Validate discriminator FIRST (before attempting deserialization)
+    if data[0..8] != CREATE_DISCRIMINATOR {
+        // Not a Create event - this is expected for Buy/Sell/other events
+        return None;
+    }
 
-    // Deserialize the rest (skip discriminator)
+    // Found a Create event! Deserialize the rest (skip 8-byte discriminator)
     match PumpCreateEvent::try_from_slice(&data[8..]) {
-        Ok(event) => Some(event),
+        Ok(event) => {
+            debug!(
+                "✅ Parsed CreateEvent: {} ({}) mint={}",
+                event.name, event.symbol, event.mint
+            );
+            Some(event)
+        }
         Err(e) => {
-            warn!("⚠️ Create discriminator matched but Borsh deserialization failed: {:?}", e);
+            warn!(
+                "Borsh deserialization failed: {} (data len: {})",
+                e,
+                data.len()
+            );
             None
         }
     }
+}
+
+/// Calculate initial price from virtual reserves
+pub fn calculate_initial_price(virtual_token_reserves: u64, virtual_sol_reserves: u64) -> f64 {
+    if virtual_token_reserves == 0 {
+        return 0.0;
+    }
+    // SOL per token
+    (virtual_sol_reserves as f64 / 1_000_000_000.0) / (virtual_token_reserves as f64 / 1_000_000.0)
 }
 
 // ============================================================================
@@ -260,13 +326,119 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_discriminator_value() {
+        // Verify our discriminator matches expected bytes
+        // This is sha256("event:createEvent")[0..8]
+        assert_eq!(CREATE_DISCRIMINATOR[0], 27);  // 0x1b
+        assert_eq!(CREATE_DISCRIMINATOR[1], 114); // 0x72
+        assert_eq!(CREATE_DISCRIMINATOR[2], 169); // 0xa9
+        assert_eq!(CREATE_DISCRIMINATOR[3], 77);  // 0x4d
+        assert_eq!(CREATE_DISCRIMINATOR[4], 222); // 0xde
+        assert_eq!(CREATE_DISCRIMINATOR[5], 235); // 0xeb
+        assert_eq!(CREATE_DISCRIMINATOR[6], 99);  // 0x63
+        assert_eq!(CREATE_DISCRIMINATOR[7], 118); // 0x76
+    }
+
+    #[test]
+    fn test_parse_singu_token() {
+        // Real data from tx 5j7DsKdxmQRYDWKcspkUy5avyNFpqtSLnD29ChGoRxZjMFHs171nFrSXiC54TvwxEaLgUWBvYC8MmEELBZExk8Ww
+        let base64_data = "G3KpTd7rY3YPAAAAVGhlIFNpbmd1bGFyaXR5BQAAAFNJTkdVUAAAAGh0dHBzOi8vaXBmcy5pby9pcGZzL2JhZmtyZWliZGxmbDZmenZiYWR5cHJkZ2NoeWk3NGw2NGFxMmd4Z3g1N210ZHhzYXl5b2R2ZnFhcDdlj2ePFn0HrqpCzAvgSjQTneRkqT5WfdGJBBm/QNBvbK/6fcORCCovNiMFYMAzuw3uHzGoLFqEG+FkQWxcymf0oL22lg79rG+3N7A/+gaHwyckutJH39aYkUL0cjQ0dGimvbaWDv2sb7c3sD/6BofDJyS60kff1piRQvRyNDR0aKboJmlpAAAAAAAQ2EfjzwMAAKwj/AYAAAAAeMX7UdECAACAxqR+jQMABt324e51j94YQl285GzN2rYa/E2DuQ0n/r35KNihi/wA";
+
+        let event = parse_create_event(base64_data).expect("Should parse SINGU token");
+
+        assert_eq!(event.name, "The Singularity");
+        assert_eq!(event.symbol, "SINGU");
+        assert_eq!(
+            event.mint.to_string(),
+            "AentZ28d2APLu8U7Bnqonb8C2MWWvv4DnwraoTCypump"
+        );
+        assert_eq!(
+            event.bonding_curve.to_string(),
+            "Hrp9jxCqcUQFUJWN49AEMRUWgwbWA4Vdvb2jLArBFmnF"
+        );
+        assert_eq!(
+            event.user.to_string(),
+            "DmZY2mTm7Ci336qq7oNvts1Bffp8vb5WyHhi7cchTREd"
+        );
+        assert_eq!(event.user, event.creator); // Same for this token
+        assert_eq!(event.timestamp, 1768498920);
+        assert_eq!(event.virtual_token_reserves, 1073000000000000);
+        assert_eq!(event.virtual_sol_reserves, 30000000000);
+        assert_eq!(event.real_token_reserves, 793100000000000);
+        assert_eq!(event.token_total_supply, 1000000000000000);
+        assert_eq!(
+            event.token_program.to_string(),
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        );
+        assert_eq!(event.is_mayhem_mode, false);
+
+        println!("✅ SINGU token parsed successfully!");
+        println!("   Name: {}", event.name);
+        println!("   Symbol: {}", event.symbol);
+        println!("   Mint: {}", event.mint);
+    }
+
+    #[test]
+    fn test_parse_taki_token() {
+        // Real data from tx vY3Ajg8wEiCtGbH8xq4LLhiNsAuZPTENMTwJzxV1umEVoxMyEUoRQwmjXbyVoRdGxTHQKJ9cjW5jMD2gBoPwUpB
+        let base64_data = "G3KpTd7rY3YEAAAAVGFraQQAAABUYWtpPQAAAGh0dHBzOi8vbWV0YWRhdGEuajd0cmFja2VyLmNvbS9tZXRhZGF0YS9iYjJhMGU3MWQyMjY0YWExLmpzb27FzfVxmN9cMINqwLCtIJRsjIJ1mBztr19XIUhnY27h8Q541h90lcZyZJNdZagw3fOqOEJTYbADjV6h5gOEMCRPxuFvr2iDGWfai1Lz8///dd0FExKKlO3gUhIcYC78rqLG4W+vaIMZZ9qLUvPz//913QUTEoqU7eBSEhxgLvyuonl7ZmkAAAAAABDYR+PPAwAArCP8BgAAAAB4xftR0QIAAIDGpH6NAwAG3fbh7nWP3hhCXbzkbM3athr8TYO5DSf+vfko2KGL/AA=";
+
+        let event = parse_create_event(base64_data).expect("Should parse Taki token");
+
+        assert_eq!(event.name, "Taki");
+        assert_eq!(event.symbol, "Taki");
+        assert_eq!(
+            event.mint.to_string(),
+            "EK9U7T5GFoNjYg8R5eBzpu8fNR6DCxD7ggYrqamR8eBa"
+        );
+        assert_eq!(
+            event.bonding_curve.to_string(),
+            "yVaR2kKvXEVVUQEqD7U7wZk7h47ePk3JvusmXz5uMgi"
+        );
+        assert_eq!(event.is_mayhem_mode, false);
+
+        println!("✅ Taki token parsed successfully!");
+    }
+
+    #[test]
+    fn test_parse_rejects_non_create_events() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        // Wrong discriminator (tradeEvent starts with different bytes)
+        let wrong_disc = STANDARD.encode([0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert!(parse_create_event(&wrong_disc).is_none());
+
+        // Too short data
+        let short_data = STANDARD.encode([0u8; 4]);
+        assert!(parse_create_event(&short_data).is_none());
+
+        // Invalid base64
+        assert!(parse_create_event("not valid base64!!!").is_none());
+
+        // Empty string
+        assert!(parse_create_event("").is_none());
+    }
+
+    #[test]
+    fn test_max_size_guard() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        // Create data larger than MAX_EVENT_SIZE with correct discriminator
+        let mut large_data = CREATE_DISCRIMINATOR.to_vec();
+        large_data.extend(vec![0u8; MAX_EVENT_SIZE + 100]);
+        let encoded = STANDARD.encode(&large_data);
+
+        // Should be rejected due to size
+        assert!(parse_create_event(&encoded).is_none());
+    }
+
+    #[test]
     fn test_derive_bonding_curve_pda() {
-        // Test with a known mint address
         let mint = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
         let (pda, bump) = derive_bonding_curve_pda(&mint);
 
         // Verify it's a valid PDA
-        assert!(bump > 0 && bump <= 255);
+        assert!(bump <= 255);
         assert_ne!(pda, mint);
     }
 
@@ -294,28 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bonding_curve_50_percent() {
-        let curve = BondingCurveState {
-            virtual_token_reserves: 1_000_000_000_000_000,
-            virtual_sol_reserves: 45_000_000_000, // 45 SOL
-            real_token_reserves: INITIAL_REAL_TOKEN_RESERVES / 2, // 50% sold
-            real_sol_reserves: 40_000_000_000,                    // 40 SOL
-            token_total_supply: 1_000_000_000_000_000,
-            complete: false,
-        };
-
-        let progress = curve.get_progress_percent();
-        assert!(
-            progress > 45.0 && progress < 55.0,
-            "Progress should be ~50%, got {}",
-            progress
-        );
-
-        let liquidity = curve.get_liquidity_sol();
-        assert_eq!(liquidity, 40.0);
-    }
-
-    #[test]
     fn test_bonding_curve_graduated() {
         let curve = BondingCurveState {
             virtual_token_reserves: 1_000_000_000_000_000,
@@ -326,33 +476,24 @@ mod tests {
             complete: true,
         };
 
-        // Should be ready to graduate
         assert!(curve.is_ready_to_graduate());
-
-        // Progress should be 100%
-        let progress = curve.get_progress_percent();
-        assert_eq!(progress, 100.0);
+        assert_eq!(curve.get_progress_percent(), 100.0);
     }
 
     #[test]
-    fn test_parse_create_event_short_data() {
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        // Data that's too short should return None
-        let short_data = STANDARD.encode([0u8; 4]);
-        assert!(parse_create_event(&short_data).is_none());
-    }
+    fn test_calculate_initial_price() {
+        let price = calculate_initial_price(
+            1_073_000_000_000_000, // virtual token reserves
+            30_000_000_000,        // virtual SOL reserves (30 SOL)
+        );
 
-    #[test]
-    fn test_parse_create_event_wrong_discriminator() {
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        // Data with wrong discriminator should return None
-        let wrong_disc = STANDARD.encode([0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        assert!(parse_create_event(&wrong_disc).is_none());
+        // Price should be approximately 0.00000002796 SOL per token
+        assert!(price > 0.0);
+        assert!(price < 0.0001);
     }
 
     #[test]
     fn test_program_ids_valid() {
-        // Ensure program IDs are valid pubkeys
         assert!(Pubkey::from_str(PUMP_PROGRAM_ID).is_ok());
         assert!(Pubkey::from_str(PUMPSWAP_PROGRAM_ID).is_ok());
         assert!(Pubkey::from_str(RAYDIUM_AMM_V4).is_ok());

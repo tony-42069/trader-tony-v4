@@ -16,7 +16,8 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::trading::pumpfun::{
-    derive_bonding_curve_ata, parse_create_event, PumpfunToken, PUMP_PROGRAM_ID,
+    calculate_initial_price, derive_bonding_curve_ata, parse_create_event, PumpfunToken,
+    PUMP_PROGRAM_ID,
 };
 
 // ============================================================================
@@ -304,12 +305,19 @@ impl PumpfunMonitor {
 
                 match parse_create_event(base64_data) {
                     Some(event) => {
+                        // Calculate initial price from event data
+                        let initial_price = calculate_initial_price(
+                            event.virtual_token_reserves,
+                            event.virtual_sol_reserves,
+                        );
+
                         info!("🚀 NEW PUMP.FUN TOKEN DISCOVERED!");
                         info!("   Mint: {}", event.mint);
                         info!("   Name: {}", event.name);
                         info!("   Symbol: {}", event.symbol);
-                        info!("   Creator: {}", event.user);
+                        info!("   Creator: {}", event.creator);
                         info!("   Bonding Curve: {}", event.bonding_curve);
+                        info!("   Initial Price: {:.10} SOL", initial_price);
                         info!("   TX: {}", signature);
 
                         // Derive the bonding curve ATA
@@ -321,15 +329,15 @@ impl PumpfunMonitor {
                             name: event.name,
                             symbol: event.symbol,
                             uri: event.uri,
-                            creator: event.user.to_string(),
+                            creator: event.creator.to_string(),
                             bonding_curve: event.bonding_curve.to_string(),
                             bonding_curve_ata: bonding_curve_ata.to_string(),
                             discovered_at: chrono::Utc::now().timestamp(),
                             creation_signature: signature.clone(),
                             is_graduated: false,
                             bonding_progress: 0.0,
-                            price_sol: 0.0,      // Will be updated from bonding curve state
-                            liquidity_sol: 0.0,  // Will be updated from bonding curve state
+                            price_sol: initial_price,
+                            liquidity_sol: 0.0, // Will be updated from bonding curve state
                         };
 
                         // Update stats
