@@ -841,6 +841,8 @@ impl AutoTrader {
                         }
                     } => {
                         if let Some(token) = token {
+                            info!("📥 Received token from WebSocket channel: {} ({})", token.symbol, token.mint);
+
                             // Process the discovered token
                             if let (Some(ref sim_mgr), Some(ref rpc)) = (&simulation_manager, &rpc_client) {
                                 let enabled_strategies: Vec<Strategy> = {
@@ -856,25 +858,33 @@ impl AutoTrader {
                                 ).await {
                                     warn!("Error processing Pump.fun token {}: {:?}", token.symbol, e);
                                 }
+                            } else {
+                                warn!("Cannot process token - simulation_manager or rpc_client not available");
                             }
+                        } else {
+                            warn!("Token channel closed - no more tokens will be received");
                         }
                     }
 
                     // Regular scan cycle timer
                     _ = scan_interval.tick() => {
-                        // Run the regular scan cycle (still uses Helius DAS for non-Pump.fun tokens)
-                        if let Err(e) = run_scan_cycle(
-                            strategies.clone(),
-                            helius_client.clone(),
-                            risk_analyzer.clone(),
-                            position_manager.clone(),
-                            config.clone(),
-                            wallet_manager.clone(),
-                            jupiter_client.clone(),
-                            simulation_manager.clone(),
-                        ).await {
-                            error!("Error in scan cycle: {:?}", e);
-                            // Continue running even if one cycle fails
+                        // In dry_run mode, skip the DAS API scan - we use WebSocket discovery instead
+                        // The DAS API returns NFT metadata, not tradeable Pump.fun tokens
+                        if !config.dry_run_mode {
+                            // Run the regular scan cycle (uses Helius DAS for non-Pump.fun tokens)
+                            if let Err(e) = run_scan_cycle(
+                                strategies.clone(),
+                                helius_client.clone(),
+                                risk_analyzer.clone(),
+                                position_manager.clone(),
+                                config.clone(),
+                                wallet_manager.clone(),
+                                jupiter_client.clone(),
+                                simulation_manager.clone(),
+                            ).await {
+                                error!("Error in scan cycle: {:?}", e);
+                                // Continue running even if one cycle fails
+                            }
                         }
 
                         // In dry run mode, update prices and check exit conditions every 5 scan cycles
