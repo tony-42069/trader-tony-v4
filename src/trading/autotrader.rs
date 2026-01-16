@@ -1195,11 +1195,16 @@ impl AutoTrader {
 
     /// Process a discovered Pump.fun token.
     /// Evaluates the token against enabled strategies and simulates buys if criteria are met.
+    ///
+    /// IMPORTANT: For NEW tokens, we use the data from CreateEvent directly!
+    /// - real_sol_reserves = 0 is EXPECTED (no one has bought yet)
+    /// - We use virtual_sol_reserves (30 SOL) for initial liquidity assessment
+    /// - We skip bonding curve fetch to avoid race condition
     async fn process_pumpfun_token(
         token: &PumpfunToken,
         strategies: &[Strategy],
         simulation_manager: &SimulationManager,
-        rpc_client: &solana_client::nonblocking::rpc_client::RpcClient,
+        _rpc_client: &solana_client::nonblocking::rpc_client::RpcClient,
     ) -> Result<()> {
         info!("🔍 Processing Pump.fun token: {} ({})", token.symbol, token.mint);
 
@@ -1209,43 +1214,27 @@ impl AutoTrader {
             return Ok(());
         }
 
-        // Fetch bonding curve state for risk analysis
-        let bonding_curve_pubkey = match Pubkey::from_str(&token.bonding_curve) {
-            Ok(pk) => pk,
-            Err(e) => {
-                warn!("Invalid bonding curve address for {}: {:?}", token.symbol, e);
-                return Ok(());
-            }
-        };
+        // USE CreateEvent DATA DIRECTLY!
+        // The token.price_sol is already calculated from CreateEvent's virtual reserves
+        // This avoids the race condition where bonding curve account isn't ready yet
+        let price_sol = token.price_sol;
 
-        // Try to get bonding curve state
-        let (progress, price_sol, liquidity_sol) = match rpc_client.get_account(&bonding_curve_pubkey).await {
-            Ok(account) => {
-                if account.data.len() > 8 {
-                    let data = &account.data[8..]; // Skip Anchor discriminator
-                    match BondingCurveState::try_from_slice(data) {
-                        Ok(state) => {
-                            (state.get_progress_percent(), state.get_price_sol(), state.get_liquidity_sol())
-                        }
-                        Err(_) => (0.0, 0.0, 0.0)
-                    }
-                } else {
-                    (0.0, 0.0, 0.0)
-                }
-            }
-            Err(e) => {
-                debug!("Failed to fetch bonding curve for {}: {:?}", token.symbol, e);
-                (0.0, 0.0, 0.0)
-            }
-        };
+        // For NEW tokens, progress is 0% (no one has bought yet) - THIS IS EXPECTED!
+        let progress = token.bonding_progress;
 
-        info!("   Progress: {:.1}%, Price: {:.10} SOL, Liquidity: {:.2} SOL",
-            progress, price_sol, liquidity_sol);
+        // For NEW tokens, real liquidity is 0 (no SOL deposited yet) - THIS IS EXPECTED!
+        // Use virtual liquidity (30 SOL) for initial assessment instead
+        const VIRTUAL_SOL_RESERVES: f64 = 30.0; // 30 SOL virtual liquidity at creation
+        let virtual_liquidity_sol = VIRTUAL_SOL_RESERVES;
 
-        // Calculate risk score based on bonding curve state
-        // Lower progress = higher risk (more volatile), very low liquidity = higher risk
-        let risk_score = calculate_pumpfun_risk_score(progress, liquidity_sol);
-        info!("   Risk Score: {}/100", risk_score);
+        info!("   Progress: {:.1}%, Price: {:.10} SOL, Virtual Liquidity: {:.2} SOL",
+            progress, price_sol, virtual_liquidity_sol);
+
+        // Calculate risk score for NEW tokens
+        // Don't penalize 0 real liquidity - it's EXPECTED for brand new tokens!
+        // Instead, use a simpler risk assessment based on token characteristics
+        let risk_score = calculate_new_token_risk_score(token);
+        info!("   Risk Score: {}/100 (new token scoring)", risk_score);
 
         // Check against each enabled strategy
         for strategy in strategies {
@@ -1254,20 +1243,21 @@ impl AutoTrader {
             }
 
             // Check if token meets strategy criteria
+            // For NEW tokens, use virtual liquidity (30 SOL) for assessment
             let meets_criteria =
                 risk_score <= strategy.max_risk_level &&
-                liquidity_sol >= strategy.min_liquidity_sol as f64;
+                virtual_liquidity_sol >= strategy.min_liquidity_sol as f64;
 
             if meets_criteria {
-                info!("✅ [CANDIDATE] {} meets criteria for strategy '{}' - Risk: {}/100, Liquidity: {:.2} SOL",
-                    token.symbol, strategy.name, risk_score, liquidity_sol);
+                info!("✅ [CANDIDATE] {} meets criteria for strategy '{}' - Risk: {}/100, Virtual Liquidity: {:.2} SOL",
+                    token.symbol, strategy.name, risk_score, virtual_liquidity_sol);
 
                 // Check if we already have a simulated position
                 if !simulation_manager.has_open_position(&token.mint).await {
                     // Simulate the buy
                     let entry_reason = format!(
-                        "Pump.fun discovery - Progress: {:.1}%, Strategy: '{}'",
-                        progress, strategy.name
+                        "Pump.fun NEW token - Price: {:.10} SOL, Strategy: '{}'",
+                        price_sol, strategy.name
                     );
 
                     match simulation_manager.simulate_buy(
@@ -1278,14 +1268,14 @@ impl AutoTrader {
                         strategy.max_position_size_sol,
                         risk_score,
                         vec![
-                            format!("Bonding progress: {:.1}%", progress),
-                            format!("Liquidity: {:.2} SOL", liquidity_sol),
+                            format!("NEW TOKEN - Just created!"),
+                            format!("Virtual Liquidity: {:.2} SOL", virtual_liquidity_sol),
                             format!("Price: {:.10} SOL", price_sol),
                         ],
                         entry_reason,
                         strategy.id.clone(),
                     ).await {
-                        Ok(_) => info!("🔍 [DRY RUN] Simulated buy for {} via strategy '{}'", token.symbol, strategy.name),
+                        Ok(_) => info!("🎯 [DRY RUN] Simulated buy for {} via strategy '{}'", token.symbol, strategy.name),
                         Err(e) => warn!("🔍 [DRY RUN] Failed to simulate buy for {}: {:?}", token.symbol, e),
                     }
                 } else {
@@ -1294,11 +1284,11 @@ impl AutoTrader {
             } else {
                 // Log why it was rejected
                 if risk_score > strategy.max_risk_level {
-                    debug!("❌ {} rejected - Risk too high: {}/100 (max: {})",
+                    info!("❌ {} rejected - Risk too high: {}/100 (max: {})",
                         token.symbol, risk_score, strategy.max_risk_level);
-                } else if liquidity_sol < strategy.min_liquidity_sol as f64 {
-                    debug!("❌ {} rejected - Liquidity too low: {:.2} SOL (min: {})",
-                        token.symbol, liquidity_sol, strategy.min_liquidity_sol);
+                } else if virtual_liquidity_sol < strategy.min_liquidity_sol as f64 {
+                    info!("❌ {} rejected - Virtual Liquidity too low: {:.2} SOL (min: {})",
+                        token.symbol, virtual_liquidity_sol, strategy.min_liquidity_sol);
                 }
             }
         }
@@ -1365,8 +1355,59 @@ pub struct PerformanceStats {
 // HELPER FUNCTIONS
 // ============================================================================
 
+/// Calculate risk score for a NEWLY CREATED Pump.fun token.
+/// For new tokens, real_sol_reserves = 0 and progress = 0% is EXPECTED!
+/// We use different criteria than established tokens.
+/// Returns a score from 0-100 where higher = more risky.
+fn calculate_new_token_risk_score(token: &PumpfunToken) -> u32 {
+    let mut risk_score: f64 = 30.0; // Start at moderate-low risk for new tokens
+
+    // 1. Price sanity check - initial price should be ~0.000000028 SOL
+    let price = token.price_sol;
+    if price <= 0.0 {
+        risk_score += 40.0; // Invalid price
+    } else if price < 0.000000001 || price > 0.001 {
+        risk_score += 20.0; // Unusual starting price
+    }
+
+    // 2. Name/Symbol quality (basic heuristics)
+    if token.name.len() < 2 || token.symbol.len() < 2 {
+        risk_score += 15.0; // Very short name/symbol
+    }
+    if token.name.len() > 50 || token.symbol.len() > 15 {
+        risk_score += 10.0; // Unusually long
+    }
+
+    // 3. Check for suspicious patterns in name/symbol
+    let name_lower = token.name.to_lowercase();
+    let symbol_lower = token.symbol.to_lowercase();
+
+    // Common scam patterns
+    let scam_keywords = ["rug", "scam", "honeypot", "free", "airdrop", "giveaway"];
+    for keyword in scam_keywords {
+        if name_lower.contains(keyword) || symbol_lower.contains(keyword) {
+            risk_score += 30.0;
+            break;
+        }
+    }
+
+    // 4. Bonus: Tokens mimicking popular projects
+    let popular_tokens = ["bonk", "wif", "pepe", "doge", "shib", "trump", "melania"];
+    for popular in popular_tokens {
+        if symbol_lower == popular || name_lower == popular {
+            // Exact match to popular token name - suspicious
+            risk_score += 15.0;
+            break;
+        }
+    }
+
+    // Clamp to 0-100 range
+    risk_score.clamp(0.0, 100.0) as u32
+}
+
 /// Calculate risk score for a Pump.fun token based on bonding curve state.
 /// Returns a score from 0-100 where higher = more risky.
+#[allow(dead_code)]
 fn calculate_pumpfun_risk_score(progress_percent: f64, liquidity_sol: f64) -> u32 {
     let mut risk_score: f64 = 50.0; // Start at moderate risk
 
