@@ -795,32 +795,45 @@ code, .stat-value, .wallet-address, .balance-value,
 /* Strategy Selector */
 .strategy-selector-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 1rem;
+    gap: 0.75rem;
     margin-bottom: 1.5rem;
     padding: 1rem;
     background: rgba(0,0,0,0.3);
     border: 1px solid var(--border-dim);
     border-radius: var(--radius);
+    overflow: visible;
 }
 
 .strategy-selector-row .control-label {
     margin-bottom: 0;
     white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .select-input {
-    flex: 1;
+    flex: 0 1 auto;
+    min-width: 180px;
     max-width: 250px;
     padding: 0.75rem 1rem;
-    background: var(--bg-darker);
+    background: var(--bg-input);
     border: 1px solid var(--border-dim);
     border-radius: var(--radius);
-    color: var(--text-primary);
+    color: var(--text-bright);
     font-family: var(--font-mono);
     font-size: 0.9rem;
     cursor: pointer;
     transition: all 0.3s ease;
+    /* Fix dropdown option visibility */
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2300f2ff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    background-size: 1rem;
+    padding-right: 2.5rem;
 }
 
 .select-input:hover {
@@ -834,16 +847,23 @@ code, .stat-value, .wallet-address, .balance-value,
 }
 
 .select-input option {
-    background: var(--bg-dark);
-    color: var(--text-primary);
+    background: var(--bg-panel);
+    color: var(--text-bright);
     padding: 0.5rem;
 }
 
 .strategy-description {
-    flex: 1;
+    flex: 1 1 100%;
     font-size: 0.8rem;
     color: var(--text-dim);
     font-style: italic;
+    min-width: 150px;
+}
+
+@media (min-width: 600px) {
+    .strategy-description {
+        flex: 1 1 auto;
+    }
 }
 
 .control-buttons {

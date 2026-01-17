@@ -864,6 +864,9 @@ impl AutoTrader {
         // Clone watchlist for use in the task
         let watchlist = self.watchlist.clone();
 
+        // Clone active_strategy_type for use in the task
+        let active_strategy_type = self.active_strategy_type.clone();
+
         // Clone config API key for RPC client in token processing
         let helius_api_key = config.helius_api_key.clone();
 
@@ -906,11 +909,26 @@ impl AutoTrader {
                         if let Some(token) = token {
                             info!("📥 Received token from WebSocket channel: {} ({})", token.symbol, token.mint);
 
+                            // Check active strategy type to determine if we should evaluate for trading
+                            let current_strategy_type = active_strategy_type.read().await.clone();
+                            let evaluate_for_trading = current_strategy_type == crate::trading::strategy::StrategyType::NewPairs;
+
+                            if !evaluate_for_trading {
+                                info!("📋 Strategy mode is {:?} - adding {} to watchlist only (no immediate trade evaluation)",
+                                    current_strategy_type, token.symbol);
+                            }
+
                             // Process the discovered token
                             if let (Some(ref sim_mgr), Some(ref rpc)) = (&simulation_manager, &rpc_client) {
-                                let enabled_strategies: Vec<Strategy> = {
+                                // Only get NewPairs strategies when evaluating for trading
+                                let enabled_strategies: Vec<Strategy> = if evaluate_for_trading {
                                     let strats = strategies.read().await;
-                                    strats.values().filter(|s| s.enabled).cloned().collect()
+                                    strats.values()
+                                        .filter(|s| s.enabled && s.strategy_type == crate::trading::strategy::StrategyType::NewPairs)
+                                        .cloned()
+                                        .collect()
+                                } else {
+                                    Vec::new() // No strategies needed when just adding to watchlist
                                 };
 
                                 if let Err(e) = AutoTrader::process_pumpfun_token(
@@ -919,6 +937,7 @@ impl AutoTrader {
                                     sim_mgr,
                                     rpc,
                                     Some(&watchlist),
+                                    evaluate_for_trading,
                                 ).await {
                                     warn!("Error processing Pump.fun token {}: {:?}", token.symbol, e);
                                 }
@@ -1270,16 +1289,21 @@ impl AutoTrader {
     /// - real_sol_reserves = 0 is EXPECTED (no one has bought yet)
     /// - We use virtual_sol_reserves (30 SOL) for initial liquidity assessment
     /// - We skip bonding curve fetch to avoid race condition
+    ///
+    /// `evaluate_for_trading`: If false, only adds to watchlist without evaluating for immediate trades.
+    /// This should be false when active_strategy_type is NOT NewPairs.
     async fn process_pumpfun_token(
         token: &PumpfunToken,
         strategies: &[Strategy],
         simulation_manager: &SimulationManager,
         _rpc_client: &solana_client::nonblocking::rpc_client::RpcClient,
         watchlist: Option<&crate::trading::watchlist::Watchlist>,
+        evaluate_for_trading: bool,
     ) -> Result<()> {
         info!("🔍 Processing Pump.fun token: {} ({})", token.symbol, token.mint);
 
         // Add to watchlist for Final Stretch/Migrated strategy evaluation
+        // This happens regardless of active strategy type
         if let Some(wl) = watchlist {
             let watchlist_token = crate::trading::watchlist::WatchlistToken::from_create_event(
                 &token.mint,
@@ -1292,6 +1316,12 @@ impl AutoTrader {
             if let Err(e) = wl.add_token(watchlist_token).await {
                 warn!("Failed to add {} to watchlist: {:?}", token.symbol, e);
             }
+        }
+
+        // If not in NewPairs mode, skip trade evaluation (scanner handles FinalStretch/Migrated)
+        if !evaluate_for_trading {
+            debug!("📋 Added {} to watchlist only (not in NewPairs mode)", token.symbol);
+            return Ok(());
         }
 
         // Skip if bonding curve is already complete
