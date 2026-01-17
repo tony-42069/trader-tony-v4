@@ -751,7 +751,7 @@ code, .stat-value, .wallet-address, .balance-value,
 
 .control-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
     gap: 1rem;
     margin-bottom: 1.5rem;
 }
@@ -790,6 +790,60 @@ code, .stat-value, .wallet-address, .balance-value,
     font-size: 1.8rem;
     color: var(--neon-cyan);
     text-shadow: 0 0 20px rgba(0, 242, 255, 0.3);
+}
+
+/* Strategy Selector */
+.strategy-selector-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    padding: 1rem;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border-dim);
+    border-radius: var(--radius);
+}
+
+.strategy-selector-row .control-label {
+    margin-bottom: 0;
+    white-space: nowrap;
+}
+
+.select-input {
+    flex: 1;
+    max-width: 250px;
+    padding: 0.75rem 1rem;
+    background: var(--bg-darker);
+    border: 1px solid var(--border-dim);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.select-input:hover {
+    border-color: var(--neon-cyan);
+}
+
+.select-input:focus {
+    outline: none;
+    border-color: var(--neon-cyan);
+    box-shadow: 0 0 10px rgba(0, 242, 255, 0.2);
+}
+
+.select-input option {
+    background: var(--bg-dark);
+    color: var(--text-primary);
+    padding: 0.5rem;
+}
+
+.strategy-description {
+    flex: 1;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    font-style: italic;
 }
 
 .control-buttons {

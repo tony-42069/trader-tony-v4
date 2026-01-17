@@ -362,6 +362,47 @@ const API = {
     },
 
     // ==========================================
+    // Active Strategy Type (Multi-Strategy)
+    // ==========================================
+
+    /**
+     * Get the currently active strategy type
+     * @returns {Promise<{strategy_type: string, display_name: string, description: string}>}
+     */
+    async getActiveStrategyType() {
+        return this.get('/api/strategy/active');
+    },
+
+    /**
+     * Set the active strategy type
+     * @param {string} strategyType - Strategy type: NewPairs, FinalStretch, or Migrated
+     * @returns {Promise<{strategy_type: string, display_name: string, description: string}>}
+     */
+    async setActiveStrategyType(strategyType) {
+        return this.post('/api/strategy/active', { strategy_type: strategyType });
+    },
+
+    // ==========================================
+    // Watchlist Endpoints
+    // ==========================================
+
+    /**
+     * Get all tokens in the watchlist
+     * @returns {Promise<{tokens: Array, count: number}>}
+     */
+    async getWatchlist() {
+        return this.get('/api/watchlist');
+    },
+
+    /**
+     * Get watchlist statistics
+     * @returns {Promise<{total_tokens: number, active_tokens: number, traded_tokens: number, migrated_tokens: number, max_capacity: number}>}
+     */
+    async getWatchlistStats() {
+        return this.get('/api/watchlist/stats');
+    },
+
+    // ==========================================
     // Manual Trading Endpoints
     // ==========================================
 

@@ -2,10 +2,84 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, warn}; // Removed unused error import
+use tracing::{debug, info, warn};
 
 // Verified base URL
 const BIRDEYE_BASE_URL: &str = "https://public-api.birdeye.so";
+
+// ============================================================================
+// Combined Token Data (for Final Stretch / Migrated strategies)
+// ============================================================================
+
+/// Combined token data from multiple Birdeye endpoints
+/// Used for Final Stretch and Migrated strategy evaluation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenData {
+    pub mint: String,
+    pub holders: u64,
+    pub volume_24h_usd: f64,
+    pub market_cap_usd: f64,
+    pub price_usd: f64,
+    pub liquidity_usd: f64,
+}
+
+impl Default for TokenData {
+    fn default() -> Self {
+        Self {
+            mint: String::new(),
+            holders: 0,
+            volume_24h_usd: 0.0,
+            market_cap_usd: 0.0,
+            price_usd: 0.0,
+            liquidity_usd: 0.0,
+        }
+    }
+}
+
+// ============================================================================
+// V3 API Response Structures
+// ============================================================================
+
+/// Response from /defi/v3/token/market-data endpoint
+#[derive(Debug, Deserialize)]
+pub struct MarketDataResponse {
+    pub data: Option<MarketData>,
+    pub success: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketData {
+    pub address: Option<String>,
+    pub price: Option<f64>,              // Price in USD
+    pub liquidity: Option<f64>,          // Liquidity in USD
+    pub mc: Option<f64>,                 // Market cap in USD (alias: marketCap)
+    #[serde(alias = "marketCap")]
+    pub market_cap: Option<f64>,
+    pub supply: Option<f64>,
+    pub circulating_supply: Option<f64>,
+}
+
+/// Response from /defi/v3/token/trade-data/single endpoint
+#[derive(Debug, Deserialize)]
+pub struct TradeDataResponse {
+    pub data: Option<TradeData>,
+    pub success: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeData {
+    pub address: Option<String>,
+    pub holder: Option<u64>,                // Number of holders
+    pub volume24h_usd: Option<f64>,         // 24h volume in USD
+    #[serde(alias = "v24hUSD")]
+    pub v24h_usd: Option<f64>,              // Alternate field name
+    pub trade24h: Option<u64>,              // Number of trades in 24h
+    pub buy24h: Option<u64>,                // Number of buys in 24h
+    pub sell24h: Option<u64>,               // Number of sells in 24h
+    pub unique_wallet24h: Option<u64>,      // Unique wallets in 24h
+}
 
 #[derive(Debug, Clone)]
 pub struct BirdeyeClient {
@@ -152,5 +226,155 @@ impl BirdeyeClient {
 
         let price = response_data.data.map(|d| d.value).unwrap_or(0.0);
         Ok(price)
+    }
+
+    // ========================================================================
+    // V3 API Methods (for Final Stretch / Migrated strategies)
+    // ========================================================================
+
+    /// Fetch market data (price, market cap, liquidity) from v3 API
+    pub async fn get_market_data(&self, mint: &str) -> Result<Option<MarketData>> {
+        let endpoint = "/defi/v3/token/market-data";
+        let url = format!("{}{}", BIRDEYE_BASE_URL, endpoint);
+
+        debug!("Fetching market data from Birdeye v3 for {}", mint);
+
+        let response = self.client
+            .get(&url)
+            .header("X-API-KEY", &self.api_key)
+            .header("x-chain", "solana")
+            .query(&[("address", mint)])
+            .send()
+            .await
+            .context("Failed to send request to Birdeye Market Data API")?;
+
+        // Check for rate limiting
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            warn!("Birdeye API rate limit hit for market-data");
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            warn!("Birdeye Market Data API error for {}: {} - {}", mint, status, error_text);
+            return Ok(None);
+        }
+
+        let response_data: MarketDataResponse = match response.json().await {
+            Ok(data) => data,
+            Err(e) => {
+                warn!("Failed to parse Birdeye Market Data response for {}: {:?}", mint, e);
+                return Ok(None);
+            }
+        };
+
+        if !response_data.success {
+            warn!("Birdeye Market Data API reported failure for {}", mint);
+            return Ok(None);
+        }
+
+        Ok(response_data.data)
+    }
+
+    /// Fetch trade data (volume, holders, trade counts) from v3 API
+    pub async fn get_trade_data(&self, mint: &str) -> Result<Option<TradeData>> {
+        let endpoint = "/defi/v3/token/trade-data/single";
+        let url = format!("{}{}", BIRDEYE_BASE_URL, endpoint);
+
+        debug!("Fetching trade data from Birdeye v3 for {}", mint);
+
+        let response = self.client
+            .get(&url)
+            .header("X-API-KEY", &self.api_key)
+            .header("x-chain", "solana")
+            .query(&[("address", mint)])
+            .send()
+            .await
+            .context("Failed to send request to Birdeye Trade Data API")?;
+
+        // Check for rate limiting
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            warn!("Birdeye API rate limit hit for trade-data");
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            warn!("Birdeye Trade Data API error for {}: {} - {}", mint, status, error_text);
+            return Ok(None);
+        }
+
+        let response_data: TradeDataResponse = match response.json().await {
+            Ok(data) => data,
+            Err(e) => {
+                warn!("Failed to parse Birdeye Trade Data response for {}: {:?}", mint, e);
+                return Ok(None);
+            }
+        };
+
+        if !response_data.success {
+            warn!("Birdeye Trade Data API reported failure for {}", mint);
+            return Ok(None);
+        }
+
+        Ok(response_data.data)
+    }
+
+    /// Combined convenience method to fetch all token data needed for strategy evaluation
+    /// Fetches both market-data and trade-data endpoints and combines results
+    pub async fn get_token_data(&self, mint: &str) -> Result<TokenData> {
+        info!("📊 Fetching combined token data for {}", mint);
+
+        // Fetch both endpoints (could be parallelized with tokio::join!)
+        let (market_data, trade_data) = tokio::join!(
+            self.get_market_data(mint),
+            self.get_trade_data(mint)
+        );
+
+        let market = market_data.ok().flatten();
+        let trade = trade_data.ok().flatten();
+
+        // Combine results into TokenData
+        let mut token_data = TokenData {
+            mint: mint.to_string(),
+            ..Default::default()
+        };
+
+        if let Some(m) = market {
+            token_data.price_usd = m.price.unwrap_or(0.0);
+            token_data.liquidity_usd = m.liquidity.unwrap_or(0.0);
+            // Market cap can be in either field
+            token_data.market_cap_usd = m.mc.or(m.market_cap).unwrap_or(0.0);
+        }
+
+        if let Some(t) = trade {
+            token_data.holders = t.holder.unwrap_or(0);
+            // Volume can be in either field
+            token_data.volume_24h_usd = t.volume24h_usd.or(t.v24h_usd).unwrap_or(0.0);
+        }
+
+        info!("   Holders: {} | Volume: ${:.0} | MCap: ${:.0} | Price: ${:.8}",
+            token_data.holders, token_data.volume_24h_usd,
+            token_data.market_cap_usd, token_data.price_usd);
+
+        Ok(token_data)
+    }
+
+    /// Batch fetch token data for multiple mints (with rate limiting consideration)
+    /// Fetches sequentially with small delays to avoid rate limits
+    pub async fn get_token_data_batch(&self, mints: &[String]) -> Vec<(String, Result<TokenData>)> {
+        let mut results = Vec::with_capacity(mints.len());
+
+        for mint in mints {
+            let data = self.get_token_data(mint).await;
+            results.push((mint.clone(), data));
+
+            // Small delay between requests to avoid rate limiting
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        results
     }
 }

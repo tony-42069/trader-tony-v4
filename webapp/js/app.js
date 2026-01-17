@@ -188,6 +188,10 @@ const App = {
             if (status.dry_run_mode) {
                 this.dryRunMode = true;
             }
+
+            // Also load active strategy type and watchlist stats
+            await this.loadActiveStrategyType();
+            await this.loadWatchlistStats();
         } catch (error) {
             console.error('[App] Error loading autotrader status:', error);
         }
@@ -1051,6 +1055,70 @@ const App = {
         if (diffDays < 7) return `${diffDays}d ago`;
 
         return date.toLocaleDateString();
+    },
+
+    // ========================================================================
+    // Active Strategy Type (Multi-Strategy Support)
+    // ========================================================================
+
+    /**
+     * Load the active strategy type from the backend
+     */
+    async loadActiveStrategyType() {
+        try {
+            const response = await API.getActiveStrategyType();
+            this.updateStrategyTypeDisplay(response);
+        } catch (error) {
+            console.error('[App] Error loading active strategy type:', error);
+        }
+    },
+
+    /**
+     * Set the active strategy type
+     */
+    async setActiveStrategyType(strategyType) {
+        try {
+            console.log(`[App] Setting active strategy type to: ${strategyType}`);
+            const response = await API.setActiveStrategyType(strategyType);
+            this.updateStrategyTypeDisplay(response);
+            this.showToast(`Strategy changed to: ${response.display_name}`, 'success');
+        } catch (error) {
+            console.error('[App] Error setting active strategy type:', error);
+            this.showToast('Failed to change strategy', 'error');
+            // Reload to restore the correct value
+            await this.loadActiveStrategyType();
+        }
+    },
+
+    /**
+     * Update the strategy type display
+     */
+    updateStrategyTypeDisplay(data) {
+        const select = document.getElementById('strategyTypeSelect');
+        const descriptionEl = document.getElementById('strategyDescription');
+
+        if (select && data.strategy_type) {
+            select.value = data.strategy_type;
+        }
+
+        if (descriptionEl && data.description) {
+            descriptionEl.textContent = data.description;
+        }
+    },
+
+    /**
+     * Load watchlist statistics
+     */
+    async loadWatchlistStats() {
+        try {
+            const stats = await API.getWatchlistStats();
+            const countEl = document.getElementById('watchlistCount');
+            if (countEl) {
+                countEl.textContent = stats.active_tokens || 0;
+            }
+        } catch (error) {
+            console.error('[App] Error loading watchlist stats:', error);
+        }
     },
 };
 
