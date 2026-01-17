@@ -361,3 +361,57 @@ pub struct SimulationStatsResponse {
     pub stats: crate::models::SimulationStats,
     pub dry_run_mode: bool,
 }
+
+// ============================================================================
+// Active Strategy Type (Multi-Strategy Support)
+// ============================================================================
+
+/// Response for getting active strategy type
+#[derive(Debug, Serialize)]
+pub struct ActiveStrategyTypeResponse {
+    pub strategy_type: String,
+    pub display_name: String,
+    pub description: String,
+}
+
+/// Request for setting active strategy type
+#[derive(Debug, Deserialize)]
+pub struct SetActiveStrategyTypeRequest {
+    pub strategy_type: String,
+}
+
+// ============================================================================
+// Watchlist
+// ============================================================================
+
+/// Response for watchlist tokens
+#[derive(Debug, Serialize)]
+pub struct WatchlistResponse {
+    pub tokens: Vec<WatchlistTokenResponse>,
+    pub count: usize,
+}
+
+/// Individual watchlist token
+#[derive(Debug, Serialize)]
+pub struct WatchlistTokenResponse {
+    pub mint: String,
+    pub bonding_curve: String,
+    pub name: String,
+    pub symbol: String,
+    pub created_at: DateTime<Utc>,
+    pub age_minutes: i64,
+    pub initial_price_sol: f64,
+    pub last_known_progress: Option<f64>,
+    pub is_migrated: bool,
+    pub traded: bool,
+}
+
+/// Response for watchlist statistics
+#[derive(Debug, Serialize)]
+pub struct WatchlistStatsResponse {
+    pub total_tokens: usize,
+    pub active_tokens: usize,
+    pub traded_tokens: usize,
+    pub migrated_tokens: usize,
+    pub max_capacity: usize,
+}

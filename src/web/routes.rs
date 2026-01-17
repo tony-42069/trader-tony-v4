@@ -36,6 +36,14 @@ pub fn create_routes(state: AppState) -> Router {
         .route("/api/strategies/:id", delete(handlers::delete_strategy))
         .route("/api/strategies/:id/toggle", post(handlers::toggle_strategy))
 
+        // Active Strategy Type (for multi-strategy support)
+        .route("/api/strategy/active", get(handlers::get_active_strategy_type))
+        .route("/api/strategy/active", post(handlers::set_active_strategy_type))
+
+        // Watchlist (tokens being tracked for Final Stretch/Migrated strategies)
+        .route("/api/watchlist", get(handlers::get_watchlist))
+        .route("/api/watchlist/stats", get(handlers::get_watchlist_stats))
+
         // AutoTrader control
         .route("/api/autotrader/status", get(handlers::get_autotrader_status))
         .route("/api/autotrader/start", post(handlers::start_autotrader))

@@ -1231,3 +1231,120 @@ pub async fn close_simulated_position(
         )),
     }
 }
+
+// ============================================================================
+// Active Strategy Type (Multi-Strategy Support)
+// ============================================================================
+
+/// Get the currently active strategy type
+pub async fn get_active_strategy_type(
+    State(state): State<AppState>,
+) -> Result<Json<ActiveStrategyTypeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+    let strategy_type = auto_trader.get_active_strategy_type().await;
+
+    Ok(Json(ActiveStrategyTypeResponse {
+        strategy_type: format!("{:?}", strategy_type),
+        display_name: strategy_type.display_name().to_string(),
+        description: strategy_type.description().to_string(),
+    }))
+}
+
+/// Set the active strategy type
+pub async fn set_active_strategy_type(
+    State(state): State<AppState>,
+    Json(req): Json<SetActiveStrategyTypeRequest>,
+) -> Result<Json<ActiveStrategyTypeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use crate::trading::strategy::StrategyType;
+
+    // Parse the strategy type from string
+    let strategy_type = match req.strategy_type.to_lowercase().as_str() {
+        "newpairs" | "new_pairs" | "sniper" => StrategyType::NewPairs,
+        "finalstretch" | "final_stretch" | "bonding" => StrategyType::FinalStretch,
+        "migrated" | "graduated" => StrategyType::Migrated,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid strategy type".to_string(),
+                    details: Some(format!(
+                        "Valid types: NewPairs, FinalStretch, Migrated. Got: {}",
+                        req.strategy_type
+                    )),
+                }),
+            ));
+        }
+    };
+
+    let auto_trader = state.auto_trader.lock().await;
+
+    if let Err(e) = auto_trader.set_active_strategy_type(strategy_type.clone()).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to set strategy type".to_string(),
+                details: Some(e.to_string()),
+            }),
+        ));
+    }
+
+    info!("Active strategy type changed to: {:?}", strategy_type);
+
+    Ok(Json(ActiveStrategyTypeResponse {
+        strategy_type: format!("{:?}", strategy_type),
+        display_name: strategy_type.display_name().to_string(),
+        description: strategy_type.description().to_string(),
+    }))
+}
+
+// ============================================================================
+// Watchlist
+// ============================================================================
+
+/// Get all tokens in the watchlist
+pub async fn get_watchlist(
+    State(state): State<AppState>,
+) -> Result<Json<WatchlistResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+    let watchlist = auto_trader.get_watchlist();
+    let tokens = watchlist.get_all_tokens().await;
+
+    let token_responses: Vec<WatchlistTokenResponse> = tokens
+        .iter()
+        .map(|t| WatchlistTokenResponse {
+            mint: t.mint.clone(),
+            bonding_curve: t.bonding_curve.clone(),
+            name: t.name.clone(),
+            symbol: t.symbol.clone(),
+            created_at: t.created_at,
+            age_minutes: t.age_minutes(),
+            initial_price_sol: t.initial_price_sol,
+            last_known_progress: t.last_known_progress,
+            is_migrated: t.is_migrated,
+            traded: t.traded,
+        })
+        .collect();
+
+    let count = token_responses.len();
+
+    Ok(Json(WatchlistResponse {
+        tokens: token_responses,
+        count,
+    }))
+}
+
+/// Get watchlist statistics
+pub async fn get_watchlist_stats(
+    State(state): State<AppState>,
+) -> Result<Json<WatchlistStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+    let stats = auto_trader.get_watchlist_stats().await;
+
+    Ok(Json(WatchlistStatsResponse {
+        total_tokens: stats.total_tokens,
+        active_tokens: stats.active_tokens,
+        traded_tokens: stats.traded_tokens,
+        migrated_tokens: stats.migrated_tokens,
+        max_capacity: stats.max_capacity,
+    }))
+}
