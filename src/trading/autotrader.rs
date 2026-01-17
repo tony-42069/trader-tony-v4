@@ -451,6 +451,11 @@ pub struct AutoTrader {
     graduation_rx: Arc<Mutex<Option<mpsc::Receiver<GraduationEvent>>>>,
     pumpfun_monitor: Arc<Mutex<Option<PumpfunMonitor>>>,
     graduation_monitor: Arc<Mutex<Option<GraduationMonitor>>>,
+
+    // Multi-strategy support (NewPairs, FinalStretch, Migrated)
+    active_strategy_type: Arc<RwLock<crate::trading::strategy::StrategyType>>,
+    watchlist: Arc<crate::trading::watchlist::Watchlist>,
+    scanner: Arc<Mutex<Option<crate::trading::scanner::Scanner>>>,
 }
 
 impl AutoTrader {
@@ -499,14 +504,20 @@ impl AutoTrader {
         // Set the default path for strategy persistence
         let strategies_path = PathBuf::from("data/strategies.json");
 
+        // Initialize watchlist and load existing tokens
+        let watchlist = Arc::new(crate::trading::watchlist::Watchlist::new());
+        if let Err(e) = watchlist.load().await {
+            warn!("Failed to load watchlist: {}", e);
+        }
+
         // Create AutoTrader instance
         let autotrader = Self {
             wallet_manager,
-            solana_client,
+            solana_client: solana_client.clone(),
             helius_client,
             jupiter_client,
-            birdeye_client,
-            config,
+            birdeye_client: birdeye_client.clone(),
+            config: config.clone(),
             position_manager,
             risk_analyzer,
             simulation_manager,
@@ -520,6 +531,10 @@ impl AutoTrader {
             graduation_rx: Arc::new(Mutex::new(None)),
             pumpfun_monitor: Arc::new(Mutex::new(None)),
             graduation_monitor: Arc::new(Mutex::new(None)),
+            // Multi-strategy support
+            active_strategy_type: Arc::new(RwLock::new(crate::trading::strategy::StrategyType::NewPairs)),
+            watchlist,
+            scanner: Arc::new(Mutex::new(None)), // Scanner initialized in start() when needed
         };
         
         // Initialize by loading strategies - use await directly since we're in an async function
@@ -740,6 +755,45 @@ impl AutoTrader {
         strategies.values().cloned().collect()
     }
 
+    // --- Active Strategy Type Management ---
+
+    /// Get the currently active strategy type
+    pub async fn get_active_strategy_type(&self) -> crate::trading::strategy::StrategyType {
+        self.active_strategy_type.read().await.clone()
+    }
+
+    /// Set the active strategy type
+    /// This determines which discovery method is used:
+    /// - NewPairs: WebSocket CreateEvent monitoring (sniper)
+    /// - FinalStretch/Migrated: Scanner with Birdeye data
+    pub async fn set_active_strategy_type(&self, strategy_type: crate::trading::strategy::StrategyType) -> Result<()> {
+        let old_type = self.get_active_strategy_type().await;
+        if old_type == strategy_type {
+            debug!("Strategy type already set to {:?}", strategy_type);
+            return Ok(());
+        }
+
+        info!("🔄 Switching active strategy from {:?} to {:?}", old_type, strategy_type);
+
+        // Update the strategy type
+        let mut active = self.active_strategy_type.write().await;
+        *active = strategy_type.clone();
+        drop(active);
+
+        info!("✅ Active strategy type set to: {:?}", strategy_type);
+        Ok(())
+    }
+
+    /// Get watchlist reference
+    pub fn get_watchlist(&self) -> Arc<crate::trading::watchlist::Watchlist> {
+        self.watchlist.clone()
+    }
+
+    /// Get watchlist statistics
+    pub async fn get_watchlist_stats(&self) -> crate::trading::watchlist::WatchlistStats {
+        self.watchlist.get_stats().await
+    }
+
     // TODO: Add method to set WebSocket broadcast channel for notifications
     // pub fn set_notification_tx(&mut self, tx: broadcast::Sender<WsMessage>) {
     //     self.notification_tx = Some(tx);
@@ -807,6 +861,9 @@ impl AutoTrader {
             None
         };
 
+        // Clone watchlist for use in the task
+        let watchlist = self.watchlist.clone();
+
         // Clone config API key for RPC client in token processing
         let helius_api_key = config.helius_api_key.clone();
 
@@ -861,6 +918,7 @@ impl AutoTrader {
                                     &enabled_strategies,
                                     sim_mgr,
                                     rpc,
+                                    Some(&watchlist),
                                 ).await {
                                     warn!("Error processing Pump.fun token {}: {:?}", token.symbol, e);
                                 }
@@ -1206,6 +1264,7 @@ impl AutoTrader {
 
     /// Process a discovered Pump.fun token.
     /// Evaluates the token against enabled strategies and simulates buys if criteria are met.
+    /// Also adds tokens to the watchlist for later evaluation by Final Stretch/Migrated strategies.
     ///
     /// IMPORTANT: For NEW tokens, we use the data from CreateEvent directly!
     /// - real_sol_reserves = 0 is EXPECTED (no one has bought yet)
@@ -1216,8 +1275,24 @@ impl AutoTrader {
         strategies: &[Strategy],
         simulation_manager: &SimulationManager,
         _rpc_client: &solana_client::nonblocking::rpc_client::RpcClient,
+        watchlist: Option<&crate::trading::watchlist::Watchlist>,
     ) -> Result<()> {
         info!("🔍 Processing Pump.fun token: {} ({})", token.symbol, token.mint);
+
+        // Add to watchlist for Final Stretch/Migrated strategy evaluation
+        if let Some(wl) = watchlist {
+            let watchlist_token = crate::trading::watchlist::WatchlistToken::from_create_event(
+                &token.mint,
+                &token.bonding_curve,
+                &token.name,
+                &token.symbol,
+                token.price_sol,
+                None, // creator not available from PumpfunToken
+            );
+            if let Err(e) = wl.add_token(watchlist_token).await {
+                warn!("Failed to add {} to watchlist: {:?}", token.symbol, e);
+            }
+        }
 
         // Skip if bonding curve is already complete
         if token.is_graduated {
