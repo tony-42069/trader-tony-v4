@@ -143,6 +143,17 @@
                         </div>
                     </div>
                     <div class="card-body">
+                        <!-- Strategy Type Selector -->
+                        <div class="strategy-selector-row">
+                            <label class="control-label" for="strategyTypeSelect">Strategy Mode:</label>
+                            <select class="select-input" id="strategyTypeSelect" onchange="App.setActiveStrategyType(this.value)">
+                                <option value="NewPairs">New Pairs (Sniper)</option>
+                                <option value="FinalStretch">Final Stretch (Bonding Curve)</option>
+                                <option value="Migrated">Migrated (Graduated)</option>
+                            </select>
+                            <span class="strategy-description" id="strategyDescription">Catches tokens within milliseconds of creation</span>
+                        </div>
+
                         <div class="control-row">
                             <div class="control-info">
                                 <span class="control-label">Active Strategies</span>
@@ -151,6 +162,10 @@
                             <div class="control-info">
                                 <span class="control-label">Open Positions</span>
                                 <span class="control-value" id="openPositions">0</span>
+                            </div>
+                            <div class="control-info">
+                                <span class="control-label">Watchlist</span>
+                                <span class="control-value" id="watchlistCount">0</span>
                             </div>
                         </div>
                         <div class="control-buttons">
