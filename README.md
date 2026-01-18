@@ -26,6 +26,7 @@ An autonomous trading bot for Solana memecoins with advanced risk analysis, buil
 - Solana CLI tools (optional, for wallet management)
 - Telegram Bot Token (obtain from @BotFather on Telegram)
 - Helius API Key (for token discovery and analysis)
+- Moralis API Key (for Final Stretch/Migrated strategy scanning)
 - Solana Wallet Private Key (Base58 encoded) - **USE A BURNER WALLET FOR TESTING/DEVELOPMENT**
 
 ### Installation
