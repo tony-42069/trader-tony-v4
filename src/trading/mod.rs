@@ -15,4 +15,4 @@ pub use pumpfun::{PumpfunToken, PumpCreateEvent, BondingCurveState};
 pub use pumpfun_monitor::{PumpfunMonitor, PumpfunMonitorConfig, MonitorStats};
 pub use graduation_monitor::{GraduationMonitor, GraduationMonitorConfig, GraduationEvent};
 pub use watchlist::{Watchlist, WatchlistToken, WatchlistStats};
-pub use scanner::{Scanner, ScannerConfig, ScanResult};
+pub use scanner::{Scanner, ScannerConfig, ScanCandidate};

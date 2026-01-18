@@ -15,6 +15,7 @@ use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 use crate::api::birdeye::BirdeyeClient;
 use crate::api::helius::HeliusClient;
 use crate::api::jupiter::{JupiterClient, SwapResult};
+use crate::api::moralis::MoralisClient;
 use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
 use crate::config::Config;
@@ -431,9 +432,10 @@ async fn execute_buy_task(
 pub struct AutoTrader {
     wallet_manager: Arc<WalletManager>,
     solana_client: Arc<SolanaClient>,
-    helius_client: Arc<HeliusClient>, // Use Arc for clients too if shared
-    jupiter_client: Arc<JupiterClient>, // Use Arc
+    helius_client: Arc<HeliusClient>,
+    jupiter_client: Arc<JupiterClient>,
     birdeye_client: Arc<BirdeyeClient>,
+    moralis_client: Option<Arc<MoralisClient>>,
     config: Arc<Config>,
     pub position_manager: Arc<PositionManager>, // Expose for references
     pub risk_analyzer: Arc<RiskAnalyzer>, // Expose for /analyze commands
@@ -473,6 +475,15 @@ impl AutoTrader {
         let birdeye_api_key = config.birdeye_api_key.as_ref()
             .context("BIRDEYE_API_KEY is required but missing in config")?;
         let birdeye_client = Arc::new(BirdeyeClient::new(birdeye_api_key));
+
+        // Initialize MoralisClient if API key is available
+        let moralis_client = config.moralis_api_key.as_ref().map(|key| {
+            info!("📡 Moralis API configured - Final Stretch/Migrated scanning enabled");
+            Arc::new(MoralisClient::new(key))
+        });
+        if moralis_client.is_none() {
+            warn!("⚠️ MORALIS_API_KEY not set - Final Stretch/Migrated strategies will not work");
+        }
 
         let risk_analyzer = Arc::new(RiskAnalyzer::new(
             solana_client.clone(),
@@ -517,6 +528,7 @@ impl AutoTrader {
             helius_client,
             jupiter_client,
             birdeye_client: birdeye_client.clone(),
+            moralis_client: moralis_client.clone(),
             config: config.clone(),
             position_manager,
             risk_analyzer,
@@ -849,8 +861,8 @@ impl AutoTrader {
         let wallet_manager = self.wallet_manager.clone();
         let jupiter_client = self.jupiter_client.clone();
         let simulation_manager = self.simulation_manager.clone();
-        // Need solana_client too for RiskAnalyzer/PositionManager potentially
-        // solana_client is used implicitly by other components
+        let moralis_client = self.moralis_client.clone();
+        let birdeye_client = self.birdeye_client.clone();
 
 
         // Take the Pump.fun token receiver for use in the task (if in dry run mode)
@@ -873,6 +885,7 @@ impl AutoTrader {
         let handle = tokio::spawn(async move {
             // Main scanning loop
             let mut scan_interval = interval(Duration::from_secs(60)); // Scan every 60 seconds
+            let mut moralis_scan_interval = interval(Duration::from_secs(15)); // Moralis scan every 15 seconds
             let mut price_update_counter: u32 = 0;
 
             // Create RPC client for Pump.fun token processing
@@ -884,6 +897,11 @@ impl AutoTrader {
             } else {
                 None
             };
+
+            // Create scanner for Final Stretch / Migrated strategies if Moralis is available
+            let scanner = moralis_client.as_ref().map(|mc| {
+                crate::trading::scanner::Scanner::new(mc.clone(), birdeye_client.clone())
+            });
 
             // Wrap the receiver in an Option so we can use it in the select!
             let mut token_rx = pumpfun_token_rx;
@@ -1000,6 +1018,89 @@ impl AutoTrader {
                                         }
                                         Err(e) => warn!("🔍 [DRY RUN] Failed to check exit conditions: {}", e),
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // Moralis scanner for Final Stretch / Migrated strategies
+                    _ = moralis_scan_interval.tick() => {
+                        // Only run if we have a scanner and are in FinalStretch or Migrated mode
+                        let current_strategy_type = active_strategy_type.read().await.clone();
+
+                        if let Some(ref sc) = scanner {
+                            match current_strategy_type {
+                                crate::trading::strategy::StrategyType::FinalStretch |
+                                crate::trading::strategy::StrategyType::Migrated => {
+                                    // Get strategy for scanning
+                                    let strats = strategies.read().await;
+                                    let matching_strategy = strats.values()
+                                        .find(|s| s.enabled && s.strategy_type == current_strategy_type)
+                                        .cloned();
+                                    drop(strats);
+
+                                    if let Some(strategy) = matching_strategy {
+                                        // Run the scanner
+                                        match sc.scan_cycle(&strategy).await {
+                                            Ok(candidates) => {
+                                                if !candidates.is_empty() {
+                                                    info!("🎯 Scanner found {} candidates for {:?}",
+                                                        candidates.len(), current_strategy_type);
+
+                                                    // Process each candidate
+                                                    for candidate in candidates {
+                                                        // In dry run mode, simulate the trade
+                                                        if config.dry_run_mode {
+                                                            if let Some(ref sim_mgr) = simulation_manager {
+                                                                if !sim_mgr.has_open_position(&candidate.token_address).await {
+                                                                    let entry_reason = match current_strategy_type {
+                                                                        crate::trading::strategy::StrategyType::FinalStretch =>
+                                                                            format!("Final Stretch: Progress {:.1}%, MCap ${:.0}, Holders {}",
+                                                                                candidate.bonding_progress.unwrap_or(0.0),
+                                                                                candidate.market_cap_usd,
+                                                                                candidate.holders),
+                                                                        crate::trading::strategy::StrategyType::Migrated =>
+                                                                            format!("Migrated: MCap ${:.0}, Holders {}",
+                                                                                candidate.market_cap_usd, candidate.holders),
+                                                                        _ => "Unknown strategy".to_string(),
+                                                                    };
+
+                                                                    match sim_mgr.simulate_buy(
+                                                                        &candidate.token_address,
+                                                                        &candidate.symbol,
+                                                                        &candidate.name,
+                                                                        candidate.price_usd,
+                                                                        strategy.max_position_size_sol,
+                                                                        30, // Lower risk for tokens meeting criteria
+                                                                        vec![entry_reason.clone()],
+                                                                        entry_reason,
+                                                                        strategy.id.clone(),
+                                                                    ).await {
+                                                                        Ok(_) => info!("🎯 [DRY RUN] Simulated {:?} buy for {} ({})",
+                                                                            current_strategy_type, candidate.symbol, candidate.token_address),
+                                                                        Err(e) => warn!("Failed to simulate buy for {}: {:?}", candidate.symbol, e),
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else {
+                                                            // Real mode - execute actual trade
+                                                            info!("🚀 [LIVE] Would execute {:?} buy for {} - implement real trade execution",
+                                                                current_strategy_type, candidate.symbol);
+                                                            // TODO: Implement real trade execution for Final Stretch / Migrated
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Scanner error for {:?}: {:?}", current_strategy_type, e);
+                                            }
+                                        }
+                                    } else {
+                                        debug!("No enabled strategy found for {:?}", current_strategy_type);
+                                    }
+                                }
+                                _ => {
+                                    // NewPairs mode - scanner not needed, WebSocket handles it
                                 }
                             }
                         }
