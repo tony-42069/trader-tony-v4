@@ -1,362 +1,313 @@
 //! Token Scanner Module
 //!
-//! Periodically scans watchlist tokens and evaluates them against
-//! Final Stretch and Migrated strategy criteria using Birdeye data.
+//! Scans for trading opportunities using Moralis API:
+//! - Final Stretch: Discovers tokens in bonding phase meeting criteria
+//! - Migrated: Discovers recently graduated tokens meeting criteria
+//!
+//! This scanner DISCOVERS tokens directly from the API - it does not watch
+//! a pre-populated watchlist. This is the correct architecture for
+//! strategies that need to find tokens already meeting certain criteria.
 
 use anyhow::{Context, Result};
-use chrono::Utc;
-use solana_client::nonblocking::rpc_client::RpcClient;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use crate::api::birdeye::{BirdeyeClient, TokenData};
-use crate::trading::pumpfun::BondingCurveState;
+use crate::api::birdeye::BirdeyeClient;
+use crate::api::moralis::{MoralisClient, MoralisTokenWithHolders};
 use crate::trading::strategy::{Strategy, StrategyType};
-use crate::trading::watchlist::{Watchlist, WatchlistToken};
 
 /// Default scan interval in seconds
 const DEFAULT_SCAN_INTERVAL_SECS: u64 = 15;
-
-/// Result of scanning a single token
-#[derive(Debug, Clone)]
-pub struct ScanResult {
-    pub token: WatchlistToken,
-    pub birdeye_data: TokenData,
-    pub bonding_state: Option<BondingCurveState>,
-    pub meets_criteria: bool,
-    pub rejection_reasons: Vec<String>,
-}
 
 /// Scanner configuration
 #[derive(Debug, Clone)]
 pub struct ScannerConfig {
     /// How often to scan (in seconds)
     pub scan_interval_secs: u64,
-    /// Maximum tokens to scan per cycle (for rate limiting)
-    pub max_tokens_per_cycle: usize,
+    /// Maximum tokens to fetch per scan
+    pub max_tokens_per_scan: u32,
 }
 
 impl Default for ScannerConfig {
     fn default() -> Self {
         Self {
             scan_interval_secs: DEFAULT_SCAN_INTERVAL_SECS,
-            max_tokens_per_cycle: 20, // Conservative to avoid rate limits
+            max_tokens_per_scan: 100,
         }
     }
 }
 
+/// Result of scanning - tokens that meet strategy criteria
+#[derive(Debug, Clone)]
+pub struct ScanCandidate {
+    pub token_address: String,
+    pub name: String,
+    pub symbol: String,
+    pub price_usd: f64,
+    pub market_cap_usd: f64,
+    pub liquidity_usd: f64,
+    pub holders: u64,
+    pub bonding_progress: Option<f64>,  // For Final Stretch
+    pub graduated_at: Option<String>,   // For Migrated
+    pub strategy_type: StrategyType,
+}
+
 /// Token scanner for Final Stretch and Migrated strategies
+/// Uses Moralis API to discover tokens directly
 pub struct Scanner {
-    watchlist: Arc<Watchlist>,
+    moralis_client: Arc<MoralisClient>,
     birdeye_client: Arc<BirdeyeClient>,
-    rpc_client: Arc<RpcClient>,
     config: ScannerConfig,
-    running: Arc<RwLock<bool>>,
+    /// Track tokens we've already seen to avoid duplicate signals
+    seen_tokens: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Scanner {
-    /// Create a new scanner
+    /// Create a new scanner with Moralis and Birdeye clients
     pub fn new(
-        watchlist: Arc<Watchlist>,
+        moralis_client: Arc<MoralisClient>,
         birdeye_client: Arc<BirdeyeClient>,
-        rpc_client: Arc<RpcClient>,
     ) -> Self {
         Self {
-            watchlist,
+            moralis_client,
             birdeye_client,
-            rpc_client,
             config: ScannerConfig::default(),
-            running: Arc::new(RwLock::new(false)),
+            seen_tokens: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
     /// Create a new scanner with custom config
     pub fn with_config(
-        watchlist: Arc<Watchlist>,
+        moralis_client: Arc<MoralisClient>,
         birdeye_client: Arc<BirdeyeClient>,
-        rpc_client: Arc<RpcClient>,
         config: ScannerConfig,
     ) -> Self {
         Self {
-            watchlist,
+            moralis_client,
             birdeye_client,
-            rpc_client,
             config,
-            running: Arc::new(RwLock::new(false)),
+            seen_tokens: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
-    /// Check if the scanner is running
-    pub async fn is_running(&self) -> bool {
-        *self.running.read().await
-    }
-
-    /// Run a single scan cycle
-    /// Returns tokens that meet the criteria for the given strategy
-    pub async fn scan_cycle(&self, strategy: &Strategy) -> Result<Vec<ScanResult>> {
-        let strategy_type = &strategy.strategy_type;
-        info!("🔍 Starting scan cycle for {:?} strategy", strategy_type);
-
-        // Get appropriate tokens based on strategy type
-        let tokens = match strategy_type {
+    /// Run a single scan cycle for the given strategy
+    /// Returns NEW candidates (tokens not seen before in this session)
+    pub async fn scan_cycle(&self, strategy: &Strategy) -> Result<Vec<ScanCandidate>> {
+        match strategy.strategy_type {
             StrategyType::NewPairs => {
                 debug!("NewPairs strategy uses WebSocket discovery, not scanner");
-                return Ok(vec![]);
+                Ok(vec![])
             }
             StrategyType::FinalStretch => {
-                self.watchlist.get_tokens_for_final_stretch().await
+                self.scan_final_stretch(strategy).await
             }
             StrategyType::Migrated => {
-                self.watchlist.get_tokens_for_migrated().await
+                self.scan_migrated(strategy).await
             }
-        };
+        }
+    }
 
-        if tokens.is_empty() {
-            debug!("No tokens to scan for {:?} strategy", strategy_type);
+    /// Scan for Final Stretch candidates using Moralis bonding endpoint
+    async fn scan_final_stretch(&self, strategy: &Strategy) -> Result<Vec<ScanCandidate>> {
+        info!("🔍 [FINAL STRETCH] Scanning Moralis for bonding tokens...");
+
+        // Get filter criteria from strategy
+        let min_progress = strategy.min_bonding_progress.unwrap_or(20.0);
+        let min_market_cap = strategy.min_market_cap_usd.unwrap_or(20_000.0);
+        let min_holders = strategy.min_holders as u64;
+        let min_volume = strategy.min_volume_usd.unwrap_or(20_000.0);
+
+        // Use Moralis client to scan and filter
+        let candidates = self.moralis_client
+            .scan_final_stretch(min_progress, min_market_cap, min_holders, self.config.max_tokens_per_scan)
+            .await
+            .context("Failed to scan Final Stretch candidates from Moralis")?;
+
+        if candidates.is_empty() {
+            debug!("No Final Stretch candidates found");
             return Ok(vec![]);
         }
 
-        info!("📋 Scanning {} tokens for {:?} strategy", tokens.len(), strategy_type);
-
-        // Limit tokens per cycle for rate limiting
-        let tokens_to_scan: Vec<_> = tokens
-            .into_iter()
-            .take(self.config.max_tokens_per_cycle)
-            .collect();
-
+        // Filter for new tokens (not seen before) and apply volume filter via Birdeye
         let mut results = Vec::new();
+        let mut seen = self.seen_tokens.write().await;
 
-        for token in tokens_to_scan {
-            match self.evaluate_token(&token, strategy).await {
-                Ok(result) => {
-                    // Update watchlist with new status
-                    let _ = self.watchlist.update_token_status(
-                        &token.mint,
-                        result.bonding_state.as_ref().map(|b| b.get_progress_percent()),
-                        result.bonding_state.as_ref().map(|b| b.complete).unwrap_or(token.is_migrated),
-                    ).await;
+        for candidate in candidates {
+            let addr = &candidate.token.token_address;
 
-                    if result.meets_criteria {
-                        results.push(result);
-                    }
-                }
-                Err(e) => {
-                    warn!("Error evaluating token {}: {:?}", token.symbol, e);
-                }
+            // Skip if we've already seen this token
+            if seen.contains(addr) {
+                debug!("Skipping {} - already seen", candidate.token.symbol);
+                continue;
             }
 
-            // Small delay between tokens to avoid rate limiting
+            // Optionally fetch volume from Birdeye if we need to filter by it
+            let volume_ok = if min_volume > 0.0 {
+                match self.birdeye_client.get_trade_data(addr).await {
+                    Ok(Some(trade_data)) => {
+                        let volume = trade_data.volume24h_usd
+                            .or(trade_data.v24h_usd)
+                            .unwrap_or(0.0);
+                        if volume < min_volume {
+                            debug!("   {} rejected: volume ${:.0} < ${:.0} min",
+                                candidate.token.symbol, volume, min_volume);
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    _ => {
+                        // If we can't get volume, assume it passes (fail-open)
+                        warn!("Could not fetch volume for {} - allowing anyway", candidate.token.symbol);
+                        true
+                    }
+                }
+            } else {
+                true
+            };
+
+            if volume_ok {
+                // Mark as seen
+                seen.insert(addr.clone());
+
+                // Create scan candidate
+                results.push(ScanCandidate {
+                    token_address: addr.clone(),
+                    name: candidate.token.name.clone(),
+                    symbol: candidate.token.symbol.clone(),
+                    price_usd: candidate.token.price_usd_f64(),
+                    market_cap_usd: candidate.token.market_cap_usd(),
+                    liquidity_usd: candidate.token.liquidity_usd(),
+                    holders: candidate.holders,
+                    bonding_progress: Some(candidate.token.bonding_progress()),
+                    graduated_at: None,
+                    strategy_type: StrategyType::FinalStretch,
+                });
+
+                info!("🔥 [NEW CANDIDATE] {} ({}) - Progress: {:.1}%, MCap: ${:.0}, Holders: {}",
+                    candidate.token.name, candidate.token.symbol,
+                    candidate.token.bonding_progress(), candidate.token.market_cap_usd(),
+                    candidate.holders);
+            }
+
+            // Small delay between Birdeye calls
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         if !results.is_empty() {
-            info!("✅ Found {} tokens meeting {:?} criteria", results.len(), strategy_type);
+            info!("✅ [FINAL STRETCH] Found {} NEW candidates to trade", results.len());
         }
 
         Ok(results)
     }
 
-    /// Evaluate a single token against strategy criteria
-    async fn evaluate_token(&self, token: &WatchlistToken, strategy: &Strategy) -> Result<ScanResult> {
-        debug!("Evaluating {} ({}) for {:?}", token.name, token.symbol, strategy.strategy_type);
+    /// Scan for Migrated candidates using Moralis graduated endpoint
+    async fn scan_migrated(&self, strategy: &Strategy) -> Result<Vec<ScanCandidate>> {
+        info!("🔍 [MIGRATED] Scanning Moralis for graduated tokens...");
 
-        // Fetch Birdeye data
-        let birdeye_data = self.birdeye_client
-            .get_token_data(&token.mint)
+        // Get filter criteria from strategy
+        let min_market_cap = strategy.min_market_cap_usd.unwrap_or(40_000.0);
+        let min_holders = strategy.min_holders as u64;
+        let max_age_hours = (strategy.max_token_age_minutes / 60) as u64; // Convert minutes to hours
+        let min_volume = strategy.min_volume_usd.unwrap_or(40_000.0);
+
+        // Use Moralis client to scan and filter
+        let candidates = self.moralis_client
+            .scan_migrated(min_market_cap, min_holders, max_age_hours, self.config.max_tokens_per_scan)
             .await
-            .context(format!("Failed to fetch Birdeye data for {}", token.symbol))?;
+            .context("Failed to scan Migrated candidates from Moralis")?;
 
-        // Fetch bonding curve state (if not migrated)
-        let bonding_state = if !token.is_migrated {
-            match self.fetch_bonding_curve_state(&token.bonding_curve).await {
-                Ok(state) => Some(state),
-                Err(e) => {
-                    debug!("Could not fetch bonding curve for {}: {:?}", token.symbol, e);
-                    None
+        if candidates.is_empty() {
+            debug!("No Migrated candidates found");
+            return Ok(vec![]);
+        }
+
+        // Filter for new tokens and apply volume filter
+        let mut results = Vec::new();
+        let mut seen = self.seen_tokens.write().await;
+
+        for candidate in candidates {
+            let addr = &candidate.token.token_address;
+
+            if seen.contains(addr) {
+                debug!("Skipping {} - already seen", candidate.token.symbol);
+                continue;
+            }
+
+            // Fetch volume from Birdeye
+            let volume_ok = if min_volume > 0.0 {
+                match self.birdeye_client.get_trade_data(addr).await {
+                    Ok(Some(trade_data)) => {
+                        let volume = trade_data.volume24h_usd
+                            .or(trade_data.v24h_usd)
+                            .unwrap_or(0.0);
+                        if volume < min_volume {
+                            debug!("   {} rejected: volume ${:.0} < ${:.0} min",
+                                candidate.token.symbol, volume, min_volume);
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    _ => {
+                        warn!("Could not fetch volume for {} - allowing anyway", candidate.token.symbol);
+                        true
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                true
+            };
 
-        // Evaluate against strategy criteria
-        let (meets_criteria, rejection_reasons) = match strategy.strategy_type {
-            StrategyType::FinalStretch => {
-                self.evaluate_final_stretch(token, &birdeye_data, bonding_state.as_ref(), strategy)
-            }
-            StrategyType::Migrated => {
-                self.evaluate_migrated(token, &birdeye_data, bonding_state.as_ref(), strategy)
-            }
-            StrategyType::NewPairs => (false, vec!["NewPairs uses WebSocket, not scanner".to_string()]),
-        };
+            if volume_ok {
+                seen.insert(addr.clone());
 
-        if meets_criteria {
-            self.log_candidate(&token, &birdeye_data, bonding_state.as_ref(), &strategy.strategy_type);
-        } else if !rejection_reasons.is_empty() {
-            debug!("❌ {} rejected: {}", token.symbol, rejection_reasons.join(", "));
+                results.push(ScanCandidate {
+                    token_address: addr.clone(),
+                    name: candidate.token.name.clone(),
+                    symbol: candidate.token.symbol.clone(),
+                    price_usd: candidate.token.price_usd_f64(),
+                    market_cap_usd: candidate.token.market_cap_usd(),
+                    liquidity_usd: candidate.token.liquidity_usd(),
+                    holders: candidate.holders,
+                    bonding_progress: None,
+                    graduated_at: candidate.token.graduated_at.clone(),
+                    strategy_type: StrategyType::Migrated,
+                });
+
+                info!("🚀 [NEW CANDIDATE] {} ({}) - MCap: ${:.0}, Holders: {}, Graduated: {:?}",
+                    candidate.token.name, candidate.token.symbol,
+                    candidate.token.market_cap_usd(), candidate.holders,
+                    candidate.token.graduated_at);
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        Ok(ScanResult {
-            token: token.clone(),
-            birdeye_data,
-            bonding_state,
-            meets_criteria,
-            rejection_reasons,
-        })
+        if !results.is_empty() {
+            info!("✅ [MIGRATED] Found {} NEW candidates to trade", results.len());
+        }
+
+        Ok(results)
     }
 
-    /// Evaluate token for Final Stretch strategy
-    fn evaluate_final_stretch(
-        &self,
-        token: &WatchlistToken,
-        birdeye: &TokenData,
-        bonding: Option<&BondingCurveState>,
-        strategy: &Strategy,
-    ) -> (bool, Vec<String>) {
-        let mut reasons = Vec::new();
-
-        // Age: 0-60 minutes
-        let age_minutes = token.age_minutes();
-        if age_minutes > strategy.max_token_age_minutes as i64 {
-            reasons.push(format!("Age {} min > {} max", age_minutes, strategy.max_token_age_minutes));
-        }
-
-        // Holders: minimum from strategy (default 50)
-        if birdeye.holders < strategy.min_holders as u64 {
-            reasons.push(format!("Holders {} < {} min", birdeye.holders, strategy.min_holders));
-        }
-
-        // Volume: minimum from strategy (default $20,000)
-        if let Some(min_vol) = strategy.min_volume_usd {
-            if birdeye.volume_24h_usd < min_vol {
-                reasons.push(format!("Volume ${:.0} < ${:.0} min", birdeye.volume_24h_usd, min_vol));
-            }
-        }
-
-        // Market Cap: minimum from strategy (default $20,000)
-        if let Some(min_mc) = strategy.min_market_cap_usd {
-            if birdeye.market_cap_usd < min_mc {
-                reasons.push(format!("MCap ${:.0} < ${:.0} min", birdeye.market_cap_usd, min_mc));
-            }
-        }
-
-        // Bonding Progress: minimum from strategy (default 20%)
-        if let Some(min_progress) = strategy.min_bonding_progress {
-            let progress = bonding.map(|b| b.get_progress_percent()).unwrap_or(0.0);
-            if progress < min_progress {
-                reasons.push(format!("Progress {:.1}% < {:.1}% min", progress, min_progress));
-            }
-        }
-
-        // Must NOT be migrated
-        if let Some(ref b) = bonding {
-            if b.complete {
-                reasons.push("Already migrated".to_string());
-            }
-        }
-
-        (reasons.is_empty(), reasons)
+    /// Clear seen tokens (e.g., when restarting or changing strategies)
+    pub async fn clear_seen_tokens(&self) {
+        let mut seen = self.seen_tokens.write().await;
+        seen.clear();
+        info!("Cleared seen tokens cache");
     }
 
-    /// Evaluate token for Migrated strategy
-    fn evaluate_migrated(
-        &self,
-        token: &WatchlistToken,
-        birdeye: &TokenData,
-        bonding: Option<&BondingCurveState>,
-        strategy: &Strategy,
-    ) -> (bool, Vec<String>) {
-        let mut reasons = Vec::new();
-
-        // Age: 0-1440 minutes (24 hours)
-        let age_minutes = token.age_minutes();
-        if age_minutes > strategy.max_token_age_minutes as i64 {
-            reasons.push(format!("Age {} min > {} max", age_minutes, strategy.max_token_age_minutes));
-        }
-
-        // Holders: minimum from strategy (default 75)
-        if birdeye.holders < strategy.min_holders as u64 {
-            reasons.push(format!("Holders {} < {} min", birdeye.holders, strategy.min_holders));
-        }
-
-        // Volume: minimum from strategy (default $40,000)
-        if let Some(min_vol) = strategy.min_volume_usd {
-            if birdeye.volume_24h_usd < min_vol {
-                reasons.push(format!("Volume ${:.0} < ${:.0} min", birdeye.volume_24h_usd, min_vol));
-            }
-        }
-
-        // Market Cap: minimum from strategy (default $40,000)
-        if let Some(min_mc) = strategy.min_market_cap_usd {
-            if birdeye.market_cap_usd < min_mc {
-                reasons.push(format!("MCap ${:.0} < ${:.0} min", birdeye.market_cap_usd, min_mc));
-            }
-        }
-
-        // Must BE migrated
-        let is_migrated = token.is_migrated || bonding.map(|b| b.complete).unwrap_or(false);
-        if !is_migrated {
-            reasons.push("Not yet migrated".to_string());
-        }
-
-        (reasons.is_empty(), reasons)
+    /// Get count of seen tokens
+    pub async fn seen_count(&self) -> usize {
+        self.seen_tokens.read().await.len()
     }
 
-    /// Fetch bonding curve state from on-chain
-    async fn fetch_bonding_curve_state(&self, bonding_curve_address: &str) -> Result<BondingCurveState> {
-        use solana_sdk::pubkey::Pubkey;
-        use std::str::FromStr;
-        use borsh::BorshDeserialize;
-
-        let pubkey = Pubkey::from_str(bonding_curve_address)
-            .context("Invalid bonding curve address")?;
-
-        let account = self.rpc_client
-            .get_account(&pubkey)
-            .await
-            .context("Failed to fetch bonding curve account")?;
-
-        // Skip 8-byte discriminator
-        if account.data.len() < 8 {
-            anyhow::bail!("Account data too small");
-        }
-
-        let state = BondingCurveState::try_from_slice(&account.data[8..])
-            .context("Failed to deserialize bonding curve state")?;
-
-        Ok(state)
-    }
-
-    /// Log a candidate token that meets criteria
-    fn log_candidate(
-        &self,
-        token: &WatchlistToken,
-        birdeye: &TokenData,
-        bonding: Option<&BondingCurveState>,
-        strategy_type: &StrategyType,
-    ) {
-        let age = token.age_minutes();
-        let progress = bonding.map(|b| b.get_progress_percent());
-
-        match strategy_type {
-            StrategyType::FinalStretch => {
-                info!("🔥 [FINAL STRETCH] {} ({}) meeting criteria!", token.name, token.symbol);
-                info!("   Age: {} min | Holders: {} | Volume: ${:.0}",
-                    age, birdeye.holders, birdeye.volume_24h_usd);
-                info!("   Market Cap: ${:.0} | Progress: {:.1}%",
-                    birdeye.market_cap_usd, progress.unwrap_or(0.0));
-            }
-            StrategyType::Migrated => {
-                info!("🚀 [MIGRATED] {} ({}) meeting criteria!", token.name, token.symbol);
-                info!("   Age: {} min | Holders: {} | Volume: ${:.0}",
-                    age, birdeye.holders, birdeye.volume_24h_usd);
-                info!("   Market Cap: ${:.0} | Status: Graduated",
-                    birdeye.market_cap_usd);
-            }
-            _ => {}
-        }
+    /// Get scan interval
+    pub fn scan_interval(&self) -> Duration {
+        Duration::from_secs(self.config.scan_interval_secs)
     }
 }
 
@@ -368,6 +319,6 @@ mod tests {
     fn test_scanner_config_default() {
         let config = ScannerConfig::default();
         assert_eq!(config.scan_interval_secs, 15);
-        assert_eq!(config.max_tokens_per_cycle, 20);
+        assert_eq!(config.max_tokens_per_scan, 100);
     }
 }

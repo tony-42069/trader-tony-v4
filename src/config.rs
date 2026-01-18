@@ -14,6 +14,7 @@ pub struct Config {
     pub helius_api_key: String,
     pub jupiter_api_key: Option<String>,
     pub birdeye_api_key: Option<String>,
+    pub moralis_api_key: Option<String>,
 
     // Web API Configuration
     pub api_host: Option<String>,
@@ -75,6 +76,7 @@ impl Config {
                 .context("HELIUS_API_KEY not set in environment")?,
             jupiter_api_key: env::var("JUPITER_API_KEY").ok(),
             birdeye_api_key: env::var("BIRDEYE_API_KEY").ok(),
+            moralis_api_key: env::var("MORALIS_API_KEY").ok(),
 
             // Web API Configuration
             api_host: env::var("API_HOST").ok(),
