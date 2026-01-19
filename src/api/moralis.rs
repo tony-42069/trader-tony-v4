@@ -227,17 +227,18 @@ impl MoralisClient {
     }
 
     /// Scan for Final Stretch candidates
-    /// Filters bonding tokens by: progress >= min_progress, market_cap >= min_mcap
+    /// Filters bonding tokens by: progress >= min_progress, market_cap >= min_mcap, age <= max_age
     /// Then fetches holder counts for each candidate
     pub async fn scan_final_stretch(
         &self,
         min_progress: f64,
         min_market_cap: f64,
         min_holders: u64,
+        max_age_minutes: u64,
         limit: u32,
     ) -> Result<Vec<MoralisTokenWithHolders>> {
-        info!("🔍 Scanning for Final Stretch candidates (progress >= {:.0}%, mcap >= ${:.0}, holders >= {})",
-            min_progress, min_market_cap, min_holders);
+        info!("🔍 Scanning for Final Stretch candidates (progress >= {:.0}%, mcap >= ${:.0}, holders >= {}, age <= {} min)",
+            min_progress, min_market_cap, min_holders, max_age_minutes);
 
         // 1. Get bonding tokens from Moralis
         let bonding_tokens = self.get_bonding_tokens(limit).await?;
@@ -247,13 +248,32 @@ impl MoralisClient {
             return Ok(vec![]);
         }
 
-        // 2. Filter by progress and market cap
+        let now = chrono::Utc::now();
+
+        // 2. Filter by progress, market cap, and AGE
         let candidates: Vec<_> = bonding_tokens
             .into_iter()
             .filter(|t| {
                 let progress = t.bonding_progress();
                 let mcap = t.market_cap_usd();
-                progress >= min_progress && mcap >= min_market_cap
+
+                // Check basic criteria
+                if progress < min_progress || mcap < min_market_cap {
+                    return false;
+                }
+
+                // Check token age - CRITICAL: reject old tokens
+                if let Some(ref created_at) = t.created_at {
+                    if let Ok(created_time) = chrono::DateTime::parse_from_rfc3339(created_at) {
+                        let age_minutes = (now - created_time.with_timezone(&chrono::Utc)).num_minutes();
+                        if age_minutes < 0 || age_minutes as u64 > max_age_minutes {
+                            debug!("   {} rejected: age {} min > {} max", t.symbol, age_minutes, max_age_minutes);
+                            return false;
+                        }
+                    }
+                }
+
+                true
             })
             .collect();
 

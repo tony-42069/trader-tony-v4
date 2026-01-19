@@ -119,10 +119,11 @@ impl Scanner {
         let min_market_cap = strategy.min_market_cap_usd.unwrap_or(20_000.0);
         let min_holders = strategy.min_holders as u64;
         let min_volume = strategy.min_volume_usd.unwrap_or(20_000.0);
+        let max_age_minutes = strategy.max_token_age_minutes as u64; // IMPORTANT: Filter by age!
 
-        // Use Moralis client to scan and filter
+        // Use Moralis client to scan and filter (now includes age filter)
         let candidates = self.moralis_client
-            .scan_final_stretch(min_progress, min_market_cap, min_holders, self.config.max_tokens_per_scan)
+            .scan_final_stretch(min_progress, min_market_cap, min_holders, max_age_minutes, self.config.max_tokens_per_scan)
             .await
             .context("Failed to scan Final Stretch candidates from Moralis")?;
 
@@ -144,29 +145,34 @@ impl Scanner {
                 continue;
             }
 
-            // Optionally fetch volume from Birdeye if we need to filter by it
-            let volume_ok = if min_volume > 0.0 {
+            // STRICT volume filter via Birdeye - FAIL-CLOSE (reject if can't verify volume)
+            let (volume_ok, volume) = if min_volume > 0.0 {
                 match self.birdeye_client.get_trade_data(addr).await {
                     Ok(Some(trade_data)) => {
-                        let volume = trade_data.volume24h_usd
+                        let vol = trade_data.volume24h_usd
                             .or(trade_data.v24h_usd)
                             .unwrap_or(0.0);
-                        if volume < min_volume {
-                            debug!("   {} rejected: volume ${:.0} < ${:.0} min",
-                                candidate.token.symbol, volume, min_volume);
-                            false
+                        if vol < min_volume {
+                            info!("   ❌ {} rejected: volume ${:.0} < ${:.0} min",
+                                candidate.token.symbol, vol, min_volume);
+                            (false, vol)
                         } else {
-                            true
+                            (true, vol)
                         }
                     }
-                    _ => {
-                        // If we can't get volume, assume it passes (fail-open)
-                        warn!("Could not fetch volume for {} - allowing anyway", candidate.token.symbol);
-                        true
+                    Ok(None) => {
+                        // No trade data = likely zero volume = REJECT
+                        info!("   ❌ {} rejected: no trade data (likely zero volume)", candidate.token.symbol);
+                        (false, 0.0)
+                    }
+                    Err(e) => {
+                        // API error = can't verify = REJECT (fail-close)
+                        warn!("   ❌ {} rejected: could not fetch volume ({})", candidate.token.symbol, e);
+                        (false, 0.0)
                     }
                 }
             } else {
-                true
+                (true, 0.0)
             };
 
             if volume_ok {
@@ -187,10 +193,10 @@ impl Scanner {
                     strategy_type: StrategyType::FinalStretch,
                 });
 
-                info!("🔥 [NEW CANDIDATE] {} ({}) - Progress: {:.1}%, MCap: ${:.0}, Holders: {}",
+                info!("✅ [CANDIDATE] {} ({}) - Progress: {:.1}%, MCap: ${:.0}, Vol: ${:.0}, Holders: {}",
                     candidate.token.name, candidate.token.symbol,
                     candidate.token.bonding_progress(), candidate.token.market_cap_usd(),
-                    candidate.holders);
+                    volume, candidate.holders);
             }
 
             // Small delay between Birdeye calls
