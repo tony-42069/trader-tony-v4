@@ -900,8 +900,12 @@ impl AutoTrader {
 
             // Create scanner for Final Stretch / Migrated strategies if Moralis is available
             let scanner = moralis_client.as_ref().map(|mc| {
+                info!("📡 Moralis scanner created - will poll every 15 seconds for FinalStretch/Migrated");
                 crate::trading::scanner::Scanner::new(mc.clone(), birdeye_client.clone())
             });
+            if scanner.is_none() {
+                warn!("⚠️ Moralis scanner NOT created - moralis_client is None");
+            }
 
             // Wrap the receiver in an Option so we can use it in the select!
             let mut token_rx = pumpfun_token_rx;
@@ -1027,6 +1031,8 @@ impl AutoTrader {
                     _ = moralis_scan_interval.tick() => {
                         // Only run if we have a scanner and are in FinalStretch or Migrated mode
                         let current_strategy_type = active_strategy_type.read().await.clone();
+                        info!("⏰ Moralis scan interval tick - strategy: {:?}, scanner exists: {}",
+                            current_strategy_type, scanner.is_some());
 
                         if let Some(ref sc) = scanner {
                             match current_strategy_type {
