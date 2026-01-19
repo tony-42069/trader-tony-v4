@@ -1102,7 +1102,71 @@ impl AutoTrader {
                                             }
                                         }
                                     } else {
-                                        debug!("No enabled strategy found for {:?}", current_strategy_type);
+                                        warn!("⚠️ No enabled {:?} strategy found! Create one in the UI or use default criteria.", current_strategy_type);
+
+                                        // Use default criteria if no strategy is defined
+                                        let default_strategy = Strategy {
+                                            id: format!("default-{:?}", current_strategy_type).to_lowercase(),
+                                            name: format!("Default {:?}", current_strategy_type),
+                                            enabled: true,
+                                            strategy_type: current_strategy_type.clone(),
+                                            max_concurrent_positions: 5,
+                                            max_position_size_sol: 0.1,
+                                            total_budget_sol: 1.0,
+                                            stop_loss_percent: Some(20),
+                                            take_profit_percent: Some(50),
+                                            trailing_stop_percent: Some(10),
+                                            max_hold_time_minutes: 60,
+                                            min_liquidity_sol: 1,
+                                            max_risk_level: 70,
+                                            min_holders: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { 50 } else { 75 },
+                                            max_token_age_minutes: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { 60 } else { 1440 },
+                                            require_lp_burned: false,
+                                            reject_if_mint_authority: false,
+                                            reject_if_freeze_authority: false,
+                                            require_can_sell: false,
+                                            max_transfer_tax_percent: Some(5.0),
+                                            max_concentration_percent: Some(90.0),
+                                            min_volume_usd: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(20_000.0) } else { Some(40_000.0) },
+                                            min_market_cap_usd: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(20_000.0) } else { Some(40_000.0) },
+                                            min_bonding_progress: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(20.0) } else { None },
+                                            require_migrated: if current_strategy_type == crate::trading::strategy::StrategyType::Migrated { Some(true) } else { None },
+                                            slippage_bps: None,
+                                            priority_fee_micro_lamports: None,
+                                            created_at: chrono::Utc::now(),
+                                            updated_at: chrono::Utc::now(),
+                                        };
+
+                                        info!("📋 Using default {:?} criteria: holders >= {}, mcap >= ${:.0}, progress >= {:.0}%",
+                                            current_strategy_type,
+                                            default_strategy.min_holders,
+                                            default_strategy.min_market_cap_usd.unwrap_or(0.0),
+                                            default_strategy.min_bonding_progress.unwrap_or(0.0));
+
+                                        // Run scanner with default strategy
+                                        match sc.scan_cycle(&default_strategy).await {
+                                            Ok(candidates) => {
+                                                if !candidates.is_empty() {
+                                                    info!("🎯 Scanner found {} candidates for {:?}", candidates.len(), current_strategy_type);
+                                                    for candidate in candidates {
+                                                        if config.dry_run_mode {
+                                                            if let Some(ref sim_mgr) = simulation_manager {
+                                                                if !sim_mgr.has_open_position(&candidate.token_address).await {
+                                                                    let entry_reason = format!("{:?}: MCap ${:.0}, Holders {}",
+                                                                        current_strategy_type, candidate.market_cap_usd, candidate.holders);
+                                                                    let _ = sim_mgr.simulate_buy(
+                                                                        &candidate.token_address, &candidate.symbol, &candidate.name,
+                                                                        candidate.price_usd, default_strategy.max_position_size_sol,
+                                                                        30, vec![entry_reason.clone()], entry_reason, default_strategy.id.clone(),
+                                                                    ).await;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => warn!("Scanner error: {:?}", e),
+                                        }
                                     }
                                 }
                                 _ => {
