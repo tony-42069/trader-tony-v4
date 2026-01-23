@@ -8,7 +8,12 @@
       "Bash(curl:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(cargo build:*)",
+      "Bash(git revert:*)",
+      "Bash(cargo test:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(python:*)"
     ]
   }
 }
