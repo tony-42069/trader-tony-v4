@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 // Verified base URL
@@ -81,10 +82,17 @@ pub struct TradeData {
     pub unique_wallet24h: Option<u64>,      // Unique wallets in 24h
 }
 
-#[derive(Debug, Clone)]
+/// Cached value with TTL
+struct CachedValue {
+    value: f64,
+    fetched_at: Instant,
+}
+
 pub struct BirdeyeClient {
     api_key: String,
     client: Client,
+    /// Cached SOL price to avoid rate limit hits (TTL: 60 seconds)
+    sol_price_cache: Mutex<Option<CachedValue>>,
 }
 
 // --- Response Structs ---
@@ -151,6 +159,7 @@ impl BirdeyeClient {
                 .timeout(Duration::from_secs(20))
                 .build()
                 .expect("Failed to create HTTP client for Birdeye"),
+            sol_price_cache: Mutex::new(None),
         }
     }
 
@@ -194,12 +203,24 @@ impl BirdeyeClient {
         Ok(response_data.data)
     }
 
-    /// Helper function to get SOL price in USD using the /defi/price endpoint.
-    /// Made public in case it's needed elsewhere.
+    /// Get SOL price in USD with 60-second cache to avoid rate limit hits.
+    /// Falls back to a reasonable default ($150) if API is unavailable.
     pub async fn get_sol_price_usd(&self) -> Result<f64> {
+        // Check cache first (TTL: 60 seconds)
+        const CACHE_TTL_SECS: u64 = 60;
+        {
+            let cache = self.sol_price_cache.lock().unwrap();
+            if let Some(ref cached) = *cache {
+                if cached.fetched_at.elapsed() < Duration::from_secs(CACHE_TTL_SECS) {
+                    debug!("Using cached SOL price: ${:.2}", cached.value);
+                    return Ok(cached.value);
+                }
+            }
+        }
+
         let endpoint = "/defi/price";
         let url = format!("{}{}", BIRDEYE_BASE_URL, endpoint);
-        let sol_address = crate::api::jupiter::SOL_MINT; // Use constant
+        let sol_address = crate::api::jupiter::SOL_MINT;
 
         let response = self.client
             .get(&url)
@@ -209,22 +230,33 @@ impl BirdeyeClient {
             .await
             .context("Failed to send SOL price request to Birdeye API")?;
 
-         if !response.status().is_success() {
+        if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            warn!("Birdeye SOL Price API error: {} - {}; returning 0", status, error_text);
-            return Ok(0.0);
+            warn!("Birdeye SOL Price API error: {} - {}; using fallback $150", status, error_text);
+            return Ok(150.0); // Reasonable fallback instead of 0
         }
 
         let response_data: PriceResponse = match response.json().await {
             Ok(data) => data,
             Err(e) => {
-                warn!("Failed to parse Birdeye SOL Price API response: {:?}; returning 0", e);
-                return Ok(0.0);
+                warn!("Failed to parse Birdeye SOL Price API response: {:?}; using fallback $150", e);
+                return Ok(150.0);
             }
         };
 
-        let price = response_data.data.map(|d| d.value).unwrap_or(0.0);
+        let price = response_data.data.map(|d| d.value).unwrap_or(150.0);
+
+        // Update cache
+        {
+            let mut cache = self.sol_price_cache.lock().unwrap();
+            *cache = Some(CachedValue {
+                value: price,
+                fetched_at: Instant::now(),
+            });
+        }
+        info!("SOL price updated: ${:.2}", price);
+
         Ok(price)
     }
 
@@ -315,6 +347,13 @@ impl BirdeyeClient {
             if !response.status().is_success() {
                 let status = response.status();
                 let error_text = response.text().await.unwrap_or_default();
+                // Treat "Compute units usage limit exceeded" as rate limit
+                if error_text.contains("Compute units") && attempt < max_retries - 1 {
+                    debug!("Birdeye compute units exceeded, retrying in {}ms (attempt {}/{})", retry_delay_ms, attempt + 1, max_retries);
+                    tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
+                    retry_delay_ms *= 2;
+                    continue;
+                }
                 warn!("Birdeye Trade Data API error for {}: {} - {}", mint, status, error_text);
                 return Ok(None);
             }
