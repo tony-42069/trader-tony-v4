@@ -1050,6 +1050,9 @@ impl AutoTrader {
                                     drop(strats);
 
                                     if let Some(strategy) = matching_strategy {
+                                        // Fetch SOL price for USD->SOL conversion
+                                        let sol_price_usd = birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
+
                                         // Run the scanner
                                         match sc.scan_cycle(&strategy).await {
                                             Ok(candidates) => {
@@ -1059,6 +1062,13 @@ impl AutoTrader {
 
                                                     // Process each candidate
                                                     for candidate in candidates {
+                                                        // Convert USD price to SOL price for accurate simulation
+                                                        let price_sol = if sol_price_usd > 0.0 {
+                                                            candidate.price_usd / sol_price_usd
+                                                        } else {
+                                                            0.0
+                                                        };
+
                                                         // In dry run mode, simulate the trade
                                                         if config.dry_run_mode {
                                                             if let Some(ref sim_mgr) = simulation_manager {
@@ -1079,15 +1089,15 @@ impl AutoTrader {
                                                                         &candidate.token_address,
                                                                         &candidate.symbol,
                                                                         &candidate.name,
-                                                                        candidate.price_usd,
+                                                                        price_sol,
                                                                         strategy.max_position_size_sol,
                                                                         30, // Lower risk for tokens meeting criteria
                                                                         vec![entry_reason.clone()],
                                                                         entry_reason,
                                                                         strategy.id.clone(),
                                                                     ).await {
-                                                                        Ok(_) => info!("🎯 [DRY RUN] Simulated {:?} buy for {} ({})",
-                                                                            current_strategy_type, candidate.symbol, candidate.token_address),
+                                                                        Ok(_) => info!("🎯 [DRY RUN] Simulated {:?} buy for {} ({}) @ {:.10} SOL (${:.6} USD, SOL=${:.0})",
+                                                                            current_strategy_type, candidate.symbol, candidate.token_address, price_sol, candidate.price_usd, sol_price_usd),
                                                                         Err(e) => warn!("Failed to simulate buy for {}: {:?}", candidate.symbol, e),
                                                                     }
                                                                 }
@@ -1147,12 +1157,22 @@ impl AutoTrader {
                                             default_strategy.min_market_cap_usd.unwrap_or(0.0),
                                             default_strategy.min_bonding_progress.unwrap_or(0.0));
 
+                                        // Fetch SOL price for USD->SOL conversion
+                                        let sol_price_usd = birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
+
                                         // Run scanner with default strategy
                                         match sc.scan_cycle(&default_strategy).await {
                                             Ok(candidates) => {
                                                 if !candidates.is_empty() {
                                                     info!("🎯 Scanner found {} candidates for {:?}", candidates.len(), current_strategy_type);
                                                     for candidate in candidates {
+                                                        // Convert USD price to SOL price
+                                                        let price_sol = if sol_price_usd > 0.0 {
+                                                            candidate.price_usd / sol_price_usd
+                                                        } else {
+                                                            0.0
+                                                        };
+
                                                         if config.dry_run_mode {
                                                             if let Some(ref sim_mgr) = simulation_manager {
                                                                 if !sim_mgr.has_open_position(&candidate.token_address).await {
@@ -1160,7 +1180,7 @@ impl AutoTrader {
                                                                         current_strategy_type, candidate.market_cap_usd, candidate.holders);
                                                                     let _ = sim_mgr.simulate_buy(
                                                                         &candidate.token_address, &candidate.symbol, &candidate.name,
-                                                                        candidate.price_usd, default_strategy.max_position_size_sol,
+                                                                        price_sol, default_strategy.max_position_size_sol,
                                                                         30, vec![entry_reason.clone()], entry_reason, default_strategy.id.clone(),
                                                                     ).await;
                                                                 }
