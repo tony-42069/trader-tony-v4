@@ -251,22 +251,35 @@ impl MoralisClient {
         let now = chrono::Utc::now();
 
         // 2. Filter by progress, market cap, and AGE
+        let mut rejected_no_progress = 0u32;
+        let mut rejected_low_progress = 0u32;
+        let mut rejected_low_mcap = 0u32;
+        let mut rejected_no_timestamp = 0u32;
+        let mut rejected_bad_timestamp = 0u32;
+        let mut rejected_too_old = 0u32;
+        let total_input = bonding_tokens.len();
+
         let candidates: Vec<_> = bonding_tokens
             .into_iter()
             .filter(|t| {
                 let mcap = t.market_cap_usd();
 
-                // Reject tokens with missing bonding progress - can't verify they're in Final Stretch
+                // Reject tokens with missing bonding progress
                 let progress = match t.bonding_progress() {
                     Some(p) => p,
                     None => {
-                        debug!("   {} rejected: missing bonding progress data", t.symbol);
+                        rejected_no_progress += 1;
                         return false;
                     }
                 };
 
                 // Check basic criteria
-                if progress < min_progress || mcap < min_market_cap {
+                if progress < min_progress {
+                    rejected_low_progress += 1;
+                    return false;
+                }
+                if mcap < min_market_cap {
+                    rejected_low_mcap += 1;
                     return false;
                 }
 
@@ -277,18 +290,18 @@ impl MoralisClient {
                             Ok(created_time) => {
                                 let age_minutes = (now - created_time.with_timezone(&chrono::Utc)).num_minutes();
                                 if age_minutes < 0 || age_minutes as u64 > max_age_minutes {
-                                    debug!("   {} rejected: age {} min > {} max", t.symbol, age_minutes, max_age_minutes);
+                                    rejected_too_old += 1;
                                     return false;
                                 }
                             }
                             Err(_) => {
-                                debug!("   {} rejected: unparseable created_at timestamp", t.symbol);
+                                rejected_bad_timestamp += 1;
                                 return false;
                             }
                         }
                     }
                     None => {
-                        debug!("   {} rejected: missing created_at timestamp - cannot verify age", t.symbol);
+                        rejected_no_timestamp += 1;
                         return false;
                     }
                 }
@@ -297,8 +310,12 @@ impl MoralisClient {
             })
             .collect();
 
+        info!("   Filter results: {}/{} passed | Rejected: {} no progress, {} low progress, {} low mcap, {} too old, {} no timestamp, {} bad timestamp",
+            candidates.len(), total_input,
+            rejected_no_progress, rejected_low_progress, rejected_low_mcap,
+            rejected_too_old, rejected_no_timestamp, rejected_bad_timestamp);
+
         if candidates.is_empty() {
-            debug!("No tokens passed progress/mcap filters");
             return Ok(vec![]);
         }
 
