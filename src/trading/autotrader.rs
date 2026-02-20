@@ -971,12 +971,14 @@ impl AutoTrader {
                         }
                     }
 
-                    // Regular scan cycle timer
+                    // Regular scan cycle timer (Helius DAS - only for NewPairs strategy)
                     _ = scan_interval.tick() => {
-                        // In dry_run mode, skip the DAS API scan - we use WebSocket discovery instead
-                        // The DAS API returns NFT metadata, not tradeable Pump.fun tokens
-                        if !config.dry_run_mode {
-                            // Run the regular scan cycle (uses Helius DAS for non-Pump.fun tokens)
+                        let current_strategy_for_scan = active_strategy_type.read().await.clone();
+
+                        // Only run Helius DAS scan for NewPairs strategy and when not in dry_run mode
+                        // FinalStretch and Migrated use the Moralis scanner (separate timer below)
+                        if !config.dry_run_mode && current_strategy_for_scan == crate::trading::strategy::StrategyType::NewPairs {
+                            // Run the regular scan cycle (uses Helius DAS for new token discovery)
                             if let Err(e) = run_scan_cycle(
                                 strategies.clone(),
                                 helius_client.clone(),
@@ -990,6 +992,8 @@ impl AutoTrader {
                                 error!("Error in scan cycle: {:?}", e);
                                 // Continue running even if one cycle fails
                             }
+                        } else if !config.dry_run_mode {
+                            debug!("Skipping Helius scan - active strategy is {:?}, not NewPairs", current_strategy_for_scan);
                         }
 
                         // In dry run mode, update prices and check exit conditions every 5 scan cycles
