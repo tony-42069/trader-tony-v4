@@ -63,6 +63,8 @@ pub struct Scanner {
     config: ScannerConfig,
     /// Track tokens we've already seen to avoid duplicate signals
     seen_tokens: Arc<RwLock<HashSet<String>>>,
+    /// Track holder counts between scans for growth rate detection
+    holder_history: Arc<RwLock<std::collections::HashMap<String, u64>>>,
 }
 
 impl Scanner {
@@ -76,6 +78,7 @@ impl Scanner {
             birdeye_client,
             config: ScannerConfig::default(),
             seen_tokens: Arc::new(RwLock::new(HashSet::new())),
+            holder_history: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -90,7 +93,73 @@ impl Scanner {
             birdeye_client,
             config,
             seen_tokens: Arc::new(RwLock::new(HashSet::new())),
+            holder_history: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Validate a candidate against advanced trade data filters (buy/sell ratio, unique wallets, volume)
+    /// Returns (passed, volume) - fail-close: rejects if data can't be fetched
+    async fn validate_trade_data(
+        &self,
+        addr: &str,
+        symbol: &str,
+        min_volume: f64,
+        min_buy_ratio: f64,
+        min_unique_wallets: Option<u64>,
+    ) -> (bool, f64) {
+        // Fetch trade data from Birdeye
+        let trade_data = match self.birdeye_client.get_trade_data(addr).await {
+            Ok(Some(td)) => td,
+            Ok(None) => {
+                info!("   {} rejected: no trade data available (likely zero activity)", symbol);
+                return (false, 0.0);
+            }
+            Err(e) => {
+                warn!("   {} rejected: failed to fetch trade data ({})", symbol, e);
+                return (false, 0.0);
+            }
+        };
+
+        // Volume check
+        let volume = trade_data.volume24h_usd
+            .or(trade_data.v24h_usd)
+            .unwrap_or(0.0);
+        if min_volume > 0.0 && volume < min_volume {
+            info!("   {} rejected: volume ${:.0} < ${:.0} min", symbol, volume, min_volume);
+            return (false, volume);
+        }
+
+        // Buy/sell ratio check
+        if min_buy_ratio > 0.0 {
+            let buys = trade_data.buy24h.unwrap_or(0) as f64;
+            let sells = trade_data.sell24h.unwrap_or(0) as f64;
+            let total_trades = buys + sells;
+            if total_trades > 0.0 {
+                let buy_ratio = (buys / total_trades) * 100.0;
+                if buy_ratio < min_buy_ratio {
+                    info!("   {} rejected: buy ratio {:.1}% < {:.1}% min (buys: {}, sells: {})",
+                        symbol, buy_ratio, min_buy_ratio, buys as u64, sells as u64);
+                    return (false, volume);
+                }
+                debug!("   {} buy ratio: {:.1}% (buys: {}, sells: {})", symbol, buy_ratio, buys as u64, sells as u64);
+            } else {
+                info!("   {} rejected: zero trades in 24h", symbol);
+                return (false, volume);
+            }
+        }
+
+        // Unique wallet check (filters wash trading)
+        if let Some(min_wallets) = min_unique_wallets {
+            let unique_wallets = trade_data.unique_wallet24h.unwrap_or(0);
+            if unique_wallets < min_wallets {
+                info!("   {} rejected: {} unique wallets < {} min (possible wash trading)",
+                    symbol, unique_wallets, min_wallets);
+                return (false, volume);
+            }
+            debug!("   {} unique wallets: {}", symbol, unique_wallets);
+        }
+
+        (true, volume)
     }
 
     /// Run a single scan cycle for the given strategy
@@ -132,9 +201,14 @@ impl Scanner {
             return Ok(vec![]);
         }
 
-        // Filter for new tokens (not seen before) and apply volume filter via Birdeye
+        // Advanced filter criteria from strategy
+        let min_buy_ratio = strategy.min_buy_ratio_percent;
+        let min_unique_wallets = strategy.min_unique_wallets_24h;
+
+        // Filter for new tokens (not seen before) and apply comprehensive trade data filters
         let mut results = Vec::new();
         let mut seen = self.seen_tokens.write().await;
+        let mut holder_hist = self.holder_history.write().await;
 
         for candidate in candidates {
             let addr = &candidate.token.token_address;
@@ -145,37 +219,27 @@ impl Scanner {
                 continue;
             }
 
-            // STRICT volume filter via Birdeye - FAIL-CLOSE (reject if can't verify volume)
-            let (volume_ok, volume) = if min_volume > 0.0 {
-                match self.birdeye_client.get_trade_data(addr).await {
-                    Ok(Some(trade_data)) => {
-                        let vol = trade_data.volume24h_usd
-                            .or(trade_data.v24h_usd)
-                            .unwrap_or(0.0);
-                        if vol < min_volume {
-                            info!("   ❌ {} rejected: volume ${:.0} < ${:.0} min",
-                                candidate.token.symbol, vol, min_volume);
-                            (false, vol)
-                        } else {
-                            (true, vol)
-                        }
-                    }
-                    Ok(None) => {
-                        // No trade data = likely zero volume = REJECT
-                        info!("   ❌ {} rejected: no trade data (likely zero volume)", candidate.token.symbol);
-                        (false, 0.0)
-                    }
-                    Err(e) => {
-                        // API error = can't verify = REJECT (fail-close)
-                        warn!("   ❌ {} rejected: could not fetch volume ({})", candidate.token.symbol, e);
-                        (false, 0.0)
-                    }
+            // Check holder growth (increasing holders = healthy token)
+            if let Some(&prev_holders) = holder_hist.get(addr) {
+                if candidate.holders < prev_holders {
+                    info!("   {} rejected: holder count declining ({} -> {})",
+                        candidate.token.symbol, prev_holders, candidate.holders);
+                    holder_hist.insert(addr.clone(), candidate.holders);
+                    continue;
                 }
-            } else {
-                (true, 0.0)
-            };
+            }
+            holder_hist.insert(addr.clone(), candidate.holders);
 
-            if volume_ok {
+            // Comprehensive trade data validation (volume, buy/sell ratio, unique wallets)
+            let (trade_ok, volume) = self.validate_trade_data(
+                addr,
+                &candidate.token.symbol,
+                min_volume,
+                min_buy_ratio,
+                min_unique_wallets,
+            ).await;
+
+            if trade_ok {
                 // Mark as seen
                 seen.insert(addr.clone());
 
@@ -231,9 +295,14 @@ impl Scanner {
             return Ok(vec![]);
         }
 
-        // Filter for new tokens and apply volume filter
+        // Advanced filter criteria from strategy
+        let min_buy_ratio = strategy.min_buy_ratio_percent;
+        let min_unique_wallets = strategy.min_unique_wallets_24h;
+
+        // Filter for new tokens and apply comprehensive trade data filters (STRICT - fail-close)
         let mut results = Vec::new();
         let mut seen = self.seen_tokens.write().await;
+        let mut holder_hist = self.holder_history.write().await;
 
         for candidate in candidates {
             let addr = &candidate.token.token_address;
@@ -243,31 +312,27 @@ impl Scanner {
                 continue;
             }
 
-            // Fetch volume from Birdeye
-            let volume_ok = if min_volume > 0.0 {
-                match self.birdeye_client.get_trade_data(addr).await {
-                    Ok(Some(trade_data)) => {
-                        let volume = trade_data.volume24h_usd
-                            .or(trade_data.v24h_usd)
-                            .unwrap_or(0.0);
-                        if volume < min_volume {
-                            debug!("   {} rejected: volume ${:.0} < ${:.0} min",
-                                candidate.token.symbol, volume, min_volume);
-                            false
-                        } else {
-                            true
-                        }
-                    }
-                    _ => {
-                        warn!("Could not fetch volume for {} - allowing anyway", candidate.token.symbol);
-                        true
-                    }
+            // Check holder growth (increasing holders = healthy token)
+            if let Some(&prev_holders) = holder_hist.get(addr) {
+                if candidate.holders < prev_holders {
+                    info!("   {} rejected: holder count declining ({} -> {})",
+                        candidate.token.symbol, prev_holders, candidate.holders);
+                    holder_hist.insert(addr.clone(), candidate.holders);
+                    continue;
                 }
-            } else {
-                true
-            };
+            }
+            holder_hist.insert(addr.clone(), candidate.holders);
 
-            if volume_ok {
+            // Comprehensive trade data validation (volume, buy/sell ratio, unique wallets)
+            let (trade_ok, _volume) = self.validate_trade_data(
+                addr,
+                &candidate.token.symbol,
+                min_volume,
+                min_buy_ratio,
+                min_unique_wallets,
+            ).await;
+
+            if trade_ok {
                 seen.insert(addr.clone());
 
                 results.push(ScanCandidate {
