@@ -1105,10 +1105,43 @@ impl AutoTrader {
                                                                 }
                                                             }
                                                         } else {
-                                                            // Real mode - execute actual trade
-                                                            info!("🚀 [LIVE] Would execute {:?} buy for {} - implement real trade execution",
-                                                                current_strategy_type, candidate.symbol);
-                                                            // TODO: Implement real trade execution for Final Stretch / Migrated
+                                                            // Real mode - execute actual trade for scanner candidates
+                                                            let token_meta = crate::models::token::TokenMetadata {
+                                                                address: candidate.token_address.clone(),
+                                                                name: candidate.name.clone(),
+                                                                symbol: candidate.symbol.clone(),
+                                                                decimals: 9, // Pump.fun tokens are always 9 decimals
+                                                                supply: None,
+                                                                logo_uri: None,
+                                                                creation_time: None,
+                                                            };
+
+                                                            match should_execute_buy_task(&token_meta, &strategy, &position_manager).await {
+                                                                Ok(true) => {
+                                                                    info!("🚀 [LIVE] Executing {:?} buy for {} ({}) - MCap ${:.0}, Holders {}",
+                                                                        current_strategy_type, candidate.symbol, candidate.token_address,
+                                                                        candidate.market_cap_usd, candidate.holders);
+                                                                    match execute_buy_task(
+                                                                        &token_meta,
+                                                                        &strategy,
+                                                                        &position_manager,
+                                                                        &jupiter_client,
+                                                                        &wallet_manager,
+                                                                        &config,
+                                                                        None,
+                                                                    ).await {
+                                                                        Ok(result) => info!("🚀 [LIVE] Buy executed for {} - tx: {}",
+                                                                            candidate.symbol, result.transaction_signature),
+                                                                        Err(e) => error!("🚀 [LIVE] Buy failed for {}: {:?}", candidate.symbol, e),
+                                                                    }
+                                                                }
+                                                                Ok(false) => {
+                                                                    debug!("Buy conditions not met for {} (budget/position limits)", candidate.symbol);
+                                                                }
+                                                                Err(e) => {
+                                                                    error!("Error checking buy conditions for {}: {:?}", candidate.symbol, e);
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
