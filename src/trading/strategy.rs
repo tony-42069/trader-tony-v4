@@ -160,8 +160,8 @@ impl Strategy {
             max_transfer_tax_percent: Some(5.0),
             max_concentration_percent: Some(40.0),  // Top holder < 40%
             // Final Stretch specific criteria
-            min_volume_usd: Some(20_000.0),      // $20k minimum volume
-            min_market_cap_usd: Some(20_000.0),  // $20k minimum market cap
+            min_volume_usd: Some(15_000.0),      // $15k minimum volume
+            min_market_cap_usd: Some(15_000.0),  // $15k minimum market cap (bonding caps at ~$32k)
             min_bonding_progress: Some(20.0),    // 20% minimum progress
             require_migrated: Some(false),       // Must NOT be migrated
             // Advanced filters

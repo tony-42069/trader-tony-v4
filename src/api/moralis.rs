@@ -254,7 +254,7 @@ impl MoralisClient {
         let mut rejected_no_progress = 0u32;
         let mut rejected_low_progress = 0u32;
         let mut rejected_low_mcap = 0u32;
-        let mut rejected_no_timestamp = 0u32;
+        let mut allowed_no_timestamp = 0u32;
         let mut rejected_bad_timestamp = 0u32;
         let mut rejected_too_old = 0u32;
         let total_input = bonding_tokens.len();
@@ -301,8 +301,9 @@ impl MoralisClient {
                         }
                     }
                     None => {
-                        rejected_no_timestamp += 1;
-                        return false;
+                        // Allow tokens without timestamp - Moralis often doesn't include it
+                        // The token still passed progress and mcap checks from Moralis data
+                        allowed_no_timestamp += 1;
                     }
                 }
 
@@ -310,10 +311,10 @@ impl MoralisClient {
             })
             .collect();
 
-        info!("   Filter results: {}/{} passed | Rejected: {} no progress, {} low progress, {} low mcap, {} too old, {} no timestamp, {} bad timestamp",
-            candidates.len(), total_input,
+        info!("   Filter results: {}/{} passed ({} had no timestamp but allowed) | Rejected: {} no progress, {} low progress, {} low mcap, {} too old, {} bad timestamp",
+            candidates.len(), total_input, allowed_no_timestamp,
             rejected_no_progress, rejected_low_progress, rejected_low_mcap,
-            rejected_too_old, rejected_no_timestamp, rejected_bad_timestamp);
+            rejected_too_old, rejected_bad_timestamp);
 
         if candidates.is_empty() {
             return Ok(vec![]);

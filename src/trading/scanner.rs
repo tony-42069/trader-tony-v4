@@ -98,7 +98,9 @@ impl Scanner {
     }
 
     /// Validate a candidate against advanced trade data filters (buy/sell ratio, unique wallets, volume)
-    /// Returns (passed, volume) - fail-close: rejects if data can't be fetched
+    /// Returns (passed, volume)
+    /// - When Birdeye data is available: applies full filtering (volume, buy ratio, wallets)
+    /// - When Birdeye is rate-limited: falls back to Moralis data (liquidity check)
     async fn validate_trade_data(
         &self,
         addr: &str,
@@ -106,17 +108,31 @@ impl Scanner {
         min_volume: f64,
         min_buy_ratio: f64,
         min_unique_wallets: Option<u64>,
+        moralis_liquidity_usd: f64,
+        moralis_mcap_usd: f64,
     ) -> (bool, f64) {
         // Fetch trade data from Birdeye
         let trade_data = match self.birdeye_client.get_trade_data(addr).await {
             Ok(Some(td)) => td,
-            Ok(None) => {
-                info!("   {} rejected: no trade data available (likely zero activity)", symbol);
-                return (false, 0.0);
-            }
-            Err(e) => {
-                warn!("   {} rejected: failed to fetch trade data ({})", symbol, e);
-                return (false, 0.0);
+            Ok(None) | Err(_) => {
+                // Birdeye unavailable - apply fallback filters from Moralis data
+                // Require minimum liquidity as a safety check (if Moralis provides it)
+                if moralis_liquidity_usd > 0.0 && moralis_liquidity_usd < 5_000.0 {
+                    info!("   {} rejected: low Moralis liquidity ${:.0} (Birdeye unavailable, using fallback)", symbol, moralis_liquidity_usd);
+                    return (false, 0.0);
+                }
+                // Require reasonable mcap-to-liquidity ratio (avoid tokens with fake mcap)
+                if moralis_liquidity_usd > 0.0 && moralis_mcap_usd > 0.0 {
+                    let mcap_to_liq = moralis_mcap_usd / moralis_liquidity_usd;
+                    if mcap_to_liq > 100.0 {
+                        info!("   {} rejected: suspicious mcap/liquidity ratio {:.0}x (mcap ${:.0}, liq ${:.0})",
+                            symbol, mcap_to_liq, moralis_mcap_usd, moralis_liquidity_usd);
+                        return (false, 0.0);
+                    }
+                }
+                info!("   {} allowed via Moralis fallback (liq: ${:.0}, mcap: ${:.0}) - Birdeye unavailable",
+                    symbol, moralis_liquidity_usd, moralis_mcap_usd);
+                return (true, 0.0);
             }
         };
 
@@ -237,6 +253,8 @@ impl Scanner {
                 min_volume,
                 min_buy_ratio,
                 min_unique_wallets,
+                candidate.token.liquidity_usd(),
+                candidate.token.market_cap_usd(),
             ).await;
 
             if trade_ok {
@@ -330,6 +348,8 @@ impl Scanner {
                 min_volume,
                 min_buy_ratio,
                 min_unique_wallets,
+                candidate.token.liquidity_usd(),
+                candidate.token.market_cap_usd(),
             ).await;
 
             if trade_ok {
