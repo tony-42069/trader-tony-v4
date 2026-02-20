@@ -891,7 +891,7 @@ impl AutoTrader {
         let handle = tokio::spawn(async move {
             // Main scanning loop
             let mut scan_interval = interval(Duration::from_secs(60)); // Scan every 60 seconds
-            let mut moralis_scan_interval = interval(Duration::from_secs(15)); // Moralis scan every 15 seconds
+            let mut moralis_scan_interval = interval(Duration::from_secs(30)); // Moralis scan every 30 seconds (reduced from 15 to avoid Birdeye rate limits)
             let mut price_update_counter: u32 = 0;
 
             // Create RPC client for Pump.fun token processing
