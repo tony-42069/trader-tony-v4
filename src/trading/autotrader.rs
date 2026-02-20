@@ -836,14 +836,18 @@ impl AutoTrader {
         // Assuming it takes Arc<Self> based on previous implementation attempt
         self.position_manager.clone().start_monitoring().await?;
 
-        // Initialize and start Pump.fun discovery in dry run mode
-        if self.config.dry_run_mode {
-            info!("🔍 [DRY RUN] Initializing Pump.fun real-time discovery...");
+        // Initialize and start Pump.fun discovery ONLY for NewPairs strategy in dry run mode
+        // FinalStretch and Migrated use the Moralis scanner instead
+        let current_strategy = self.get_active_strategy_type().await;
+        if self.config.dry_run_mode && current_strategy == crate::trading::strategy::StrategyType::NewPairs {
+            info!("🔍 [DRY RUN] Initializing Pump.fun real-time discovery (NewPairs mode)...");
             if let Err(e) = self.init_pumpfun_discovery().await {
                 warn!("Failed to initialize Pump.fun discovery: {:?}", e);
             } else if let Err(e) = self.start_pumpfun_discovery().await {
                 warn!("Failed to start Pump.fun discovery: {:?}", e);
             }
+        } else if self.config.dry_run_mode {
+            info!("📡 [DRY RUN] Strategy is {:?} - skipping Pump.fun WebSocket, using Moralis scanner", current_strategy);
         }
 
         // Set running flag to true
