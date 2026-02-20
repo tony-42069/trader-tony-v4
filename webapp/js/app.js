@@ -661,6 +661,12 @@ const App = {
             stopBtn.addEventListener('click', () => this.stopTrading());
         }
 
+        // Strategy type selector
+        const strategySelect = document.getElementById('strategyTypeSelect');
+        if (strategySelect) {
+            strategySelect.addEventListener('change', (e) => this.setActiveStrategyType(e.target.value));
+        }
+
         // Analyze token button
         const analyzeBtn = document.getElementById('analyzeTokenBtn');
         if (analyzeBtn) {
