@@ -26,7 +26,9 @@ RUN mkdir src && \
 RUN cargo build --release && \
     rm -rf src target/release/trader-tony-v4*
 
-# Copy actual source code
+# Cache bust: any change to source files invalidates from here
+# Railway may aggressively cache COPY layers, so we use a build arg
+ARG CACHEBUST=1
 COPY src ./src
 
 # Build the actual application
