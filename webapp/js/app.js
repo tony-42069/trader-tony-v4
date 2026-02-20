@@ -417,12 +417,16 @@ const App = {
      * Update simulation display
      */
     updateSimulationDisplay(stats, positions) {
-        // Update stats
+        // Update stats with full metrics including wins, losses, best/worst
         const elements = {
             simTotalTrades: stats.total_simulated_trades || 0,
             simWinRate: `${this.formatNumber(stats.win_rate || 0, 1)}%`,
+            simWinningTrades: stats.winning_trades || 0,
+            simLosingTrades: stats.losing_trades || 0,
             simRealizedPnl: `${this.formatNumberSigned(stats.total_realized_pnl_sol || 0)} SOL`,
             simUnrealizedPnl: `${this.formatNumberSigned(stats.total_unrealized_pnl_sol || 0)} SOL`,
+            simBestTrade: `${this.formatNumberSigned(stats.best_trade_pnl_percent || 0)}%`,
+            simWorstTrade: `${this.formatNumberSigned(stats.worst_trade_pnl_percent || 0)}%`,
             simWouldHaveSpent: `${this.formatNumber(stats.would_have_spent_sol || 0, 3)} SOL`,
             simWouldHaveReturned: `${this.formatNumber(stats.would_have_returned_sol || 0, 3)} SOL`,
         };
@@ -431,10 +435,14 @@ const App = {
             const el = document.getElementById(id);
             if (el) {
                 el.textContent = value;
-                // Add color to PnL values
-                if (id.includes('Pnl')) {
+                // Add color to PnL and trade count values
+                if (id.includes('Pnl') || id === 'simBestTrade' || id === 'simWorstTrade') {
                     const numValue = parseFloat(String(value).replace(/[^\d.-]/g, ''));
                     el.className = `sim-stat-value ${numValue >= 0 ? 'positive' : 'negative'}`;
+                } else if (id === 'simWinningTrades') {
+                    el.className = 'sim-stat-value positive';
+                } else if (id === 'simLosingTrades') {
+                    el.className = `sim-stat-value ${(stats.losing_trades || 0) > 0 ? 'negative' : ''}`;
                 }
             }
         }
@@ -455,12 +463,36 @@ const App = {
             return;
         }
 
-        tbody.innerHTML = positions.map(pos => {
-            const pnlClass = (pos.unrealized_pnl_sol || 0) >= 0 ? 'positive' : 'negative';
-            const statusClass = pos.status === 'Open' ? 'open' : 'closed';
+        // Sort: open positions first, then closed by exit time (most recent first)
+        const sorted = [...positions].sort((a, b) => {
+            if (a.status === 'Open' && b.status !== 'Open') return -1;
+            if (a.status !== 'Open' && b.status === 'Open') return 1;
+            // Both closed: sort by exit_time descending
+            if (a.exit_time && b.exit_time) return new Date(b.exit_time) - new Date(a.exit_time);
+            return 0;
+        });
+
+        tbody.innerHTML = sorted.map(pos => {
+            const isOpen = pos.status === 'Open';
+            // Use realized PnL for closed positions, unrealized for open
+            const pnlSol = isOpen ? (pos.unrealized_pnl_sol || 0) : (pos.realized_pnl_sol || pos.unrealized_pnl_sol || 0);
+            const pnlPct = isOpen ? (pos.unrealized_pnl_percent || 0) : (pos.realized_pnl_percent || pos.unrealized_pnl_percent || 0);
+            const pnlClass = pnlSol >= 0 ? 'positive' : 'negative';
+            const pnlLabel = isOpen ? '' : ' (realized)';
+
+            // Format status display
+            let statusDisplay;
+            if (isOpen) {
+                statusDisplay = `<button class="btn btn-sm btn-danger" onclick="App.closeSimulatedPosition('${pos.id}')">Close</button>`;
+            } else {
+                // Show exit reason for closed positions
+                const reason = pos.exit_reason || pos.status;
+                const statusClass = pnlSol >= 0 ? 'positive' : 'negative';
+                statusDisplay = `<span class="status-badge ${statusClass}" title="${reason}">${reason}</span>`;
+            }
 
             return `
-                <tr>
+                <tr class="${!isOpen ? 'closed-position' : ''}">
                     <td>
                         <div class="token-cell">
                             <span class="token-symbol">${pos.token_symbol || 'Unknown'}</span>
@@ -468,10 +500,10 @@ const App = {
                         </div>
                     </td>
                     <td>${this.formatNumber(pos.entry_amount_sol, 4)} SOL</td>
-                    <td>${this.formatNumber(pos.current_value_sol, 4)} SOL</td>
+                    <td>${this.formatNumber(isOpen ? pos.current_value_sol : (pos.entry_amount_sol + pnlSol), 4)} SOL</td>
                     <td class="${pnlClass}">
-                        ${this.formatNumberSigned(pos.unrealized_pnl_sol)} SOL
-                        <span class="pnl-percent">(${this.formatNumberSigned(pos.unrealized_pnl_percent)}%)</span>
+                        ${this.formatNumberSigned(pnlSol)} SOL${pnlLabel}
+                        <span class="pnl-percent">(${this.formatNumberSigned(pnlPct)}%)</span>
                     </td>
                     <td>
                         <span class="risk-score risk-${this.getRiskLevel(pos.risk_score)}">${pos.risk_score}/100</span>
@@ -479,13 +511,7 @@ const App = {
                     <td title="${pos.selection_reason}">
                         <span class="selection-reason">${this.truncate(pos.selection_reason, 20)}</span>
                     </td>
-                    <td>
-                        ${pos.status === 'Open' ? `
-                            <button class="btn btn-sm btn-danger" onclick="App.closeSimulatedPosition('${pos.id}')">
-                                Close
-                            </button>
-                        ` : `<span class="status-badge status-${statusClass}">${pos.status}</span>`}
-                    </td>
+                    <td>${statusDisplay}</td>
                 </tr>
             `;
         }).join('');

@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+fn default_min_buy_ratio() -> f64 { 0.0 }
+
 /// Strategy type determines which discovery/evaluation method is used
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +78,12 @@ pub struct Strategy {
     pub min_bonding_progress: Option<f64>,   // Minimum bonding curve progress % (0-100, e.g., 20.0)
     pub require_migrated: Option<bool>,      // TRUE = must be migrated, FALSE = must NOT be migrated, None = don't check
 
+    // Advanced Filters (for FinalStretch/Migrated)
+    #[serde(default = "default_min_buy_ratio")]
+    pub min_buy_ratio_percent: f64,          // Minimum buy/sell ratio (60.0 = 60% buys, reject if sells dominate)
+    #[serde(default)]
+    pub min_unique_wallets_24h: Option<u64>, // Minimum unique wallets trading in 24h (filters out wash trading)
+
     // Transaction Parameters (Optional overrides for config defaults)
     pub slippage_bps: Option<u32>,           // Slippage basis points for swaps (overrides config)
     pub priority_fee_micro_lamports: Option<u64>, // Priority fee for swaps (overrides config)
@@ -116,6 +124,9 @@ impl Strategy {
             min_market_cap_usd: None,
             min_bonding_progress: None,
             require_migrated: None,
+            // Advanced filters (not used for NewPairs)
+            min_buy_ratio_percent: 0.0,
+            min_unique_wallets_24h: None,
             slippage_bps: None, // Use global default
             priority_fee_micro_lamports: None, // Use global default
             created_at: now,
@@ -142,17 +153,20 @@ impl Strategy {
             max_risk_level: 70,
             min_holders: 50,            // Minimum 50 holders
             max_token_age_minutes: 60,  // 0-60 minutes old
-            require_lp_burned: false,   // N/A for bonding curve
-            reject_if_mint_authority: false,
-            reject_if_freeze_authority: false,
-            require_can_sell: false,
-            max_transfer_tax_percent: None,
-            max_concentration_percent: None,
+            require_lp_burned: false,   // N/A for bonding curve (still on pump.fun)
+            reject_if_mint_authority: true,
+            reject_if_freeze_authority: true,
+            require_can_sell: true,
+            max_transfer_tax_percent: Some(5.0),
+            max_concentration_percent: Some(40.0),  // Top holder < 40%
             // Final Stretch specific criteria
             min_volume_usd: Some(20_000.0),      // $20k minimum volume
             min_market_cap_usd: Some(20_000.0),  // $20k minimum market cap
             min_bonding_progress: Some(20.0),    // 20% minimum progress
             require_migrated: Some(false),       // Must NOT be migrated
+            // Advanced filters
+            min_buy_ratio_percent: 55.0,         // At least 55% buys (healthy demand)
+            min_unique_wallets_24h: Some(20),    // At least 20 unique wallets (organic activity)
             slippage_bps: None,
             priority_fee_micro_lamports: None,
             created_at: now,
@@ -190,6 +204,9 @@ impl Strategy {
             min_market_cap_usd: Some(40_000.0),  // $40k minimum market cap
             min_bonding_progress: None,          // N/A - already graduated
             require_migrated: Some(true),        // Must BE migrated
+            // Advanced filters
+            min_buy_ratio_percent: 55.0,         // At least 55% buys
+            min_unique_wallets_24h: Some(30),    // At least 30 unique wallets (more established)
             slippage_bps: None,
             priority_fee_micro_lamports: None,
             created_at: now,

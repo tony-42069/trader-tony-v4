@@ -278,48 +278,64 @@ impl BirdeyeClient {
     }
 
     /// Fetch trade data (volume, holders, trade counts) from v3 API
+    /// Includes retry logic for rate limits
     pub async fn get_trade_data(&self, mint: &str) -> Result<Option<TradeData>> {
         let endpoint = "/defi/v3/token/trade-data/single";
         let url = format!("{}{}", BIRDEYE_BASE_URL, endpoint);
 
         debug!("Fetching trade data from Birdeye v3 for {}", mint);
 
-        let response = self.client
-            .get(&url)
-            .header("X-API-KEY", &self.api_key)
-            .header("x-chain", "solana")
-            .query(&[("address", mint)])
-            .send()
-            .await
-            .context("Failed to send request to Birdeye Trade Data API")?;
+        // Retry up to 3 times with increasing delays for rate limits
+        let max_retries = 3;
+        let mut retry_delay_ms = 500; // Start with 500ms
 
-        // Check for rate limiting
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            warn!("Birdeye API rate limit hit for trade-data");
-            return Ok(None);
-        }
+        for attempt in 0..max_retries {
+            let response = self.client
+                .get(&url)
+                .header("X-API-KEY", &self.api_key)
+                .header("x-chain", "solana")
+                .query(&[("address", mint)])
+                .send()
+                .await
+                .context("Failed to send request to Birdeye Trade Data API")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            warn!("Birdeye Trade Data API error for {}: {} - {}", mint, status, error_text);
-            return Ok(None);
-        }
+            // Check for rate limiting - retry with backoff
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                if attempt < max_retries - 1 {
+                    debug!("Birdeye rate limit hit, retrying in {}ms (attempt {}/{})", retry_delay_ms, attempt + 1, max_retries);
+                    tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
+                    retry_delay_ms *= 2; // Exponential backoff
+                    continue;
+                } else {
+                    warn!("Birdeye API rate limit hit for trade-data after {} retries", max_retries);
+                    return Ok(None);
+                }
+            }
 
-        let response_data: TradeDataResponse = match response.json().await {
-            Ok(data) => data,
-            Err(e) => {
-                warn!("Failed to parse Birdeye Trade Data response for {}: {:?}", mint, e);
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_default();
+                warn!("Birdeye Trade Data API error for {}: {} - {}", mint, status, error_text);
                 return Ok(None);
             }
-        };
 
-        if !response_data.success {
-            warn!("Birdeye Trade Data API reported failure for {}", mint);
-            return Ok(None);
+            let response_data: TradeDataResponse = match response.json().await {
+                Ok(data) => data,
+                Err(e) => {
+                    warn!("Failed to parse Birdeye Trade Data response for {}: {:?}", mint, e);
+                    return Ok(None);
+                }
+            };
+
+            if !response_data.success {
+                warn!("Birdeye Trade Data API reported failure for {}", mint);
+                return Ok(None);
+            }
+
+            return Ok(response_data.data);
         }
 
-        Ok(response_data.data)
+        Ok(None)
     }
 
     /// Combined convenience method to fetch all token data needed for strategy evaluation

@@ -72,9 +72,9 @@ impl MoralisPumpToken {
             .unwrap_or(0.0)
     }
 
-    /// Get bonding progress (0-100)
-    pub fn bonding_progress(&self) -> f64 {
-        self.bonding_curve_progress.unwrap_or(0.0)
+    /// Get bonding progress (0-100), returns None if data is missing
+    pub fn bonding_progress(&self) -> Option<f64> {
+        self.bonding_curve_progress
     }
 }
 
@@ -254,22 +254,42 @@ impl MoralisClient {
         let candidates: Vec<_> = bonding_tokens
             .into_iter()
             .filter(|t| {
-                let progress = t.bonding_progress();
                 let mcap = t.market_cap_usd();
+
+                // Reject tokens with missing bonding progress - can't verify they're in Final Stretch
+                let progress = match t.bonding_progress() {
+                    Some(p) => p,
+                    None => {
+                        debug!("   {} rejected: missing bonding progress data", t.symbol);
+                        return false;
+                    }
+                };
 
                 // Check basic criteria
                 if progress < min_progress || mcap < min_market_cap {
                     return false;
                 }
 
-                // Check token age - CRITICAL: reject old tokens
-                if let Some(ref created_at) = t.created_at {
-                    if let Ok(created_time) = chrono::DateTime::parse_from_rfc3339(created_at) {
-                        let age_minutes = (now - created_time.with_timezone(&chrono::Utc)).num_minutes();
-                        if age_minutes < 0 || age_minutes as u64 > max_age_minutes {
-                            debug!("   {} rejected: age {} min > {} max", t.symbol, age_minutes, max_age_minutes);
-                            return false;
+                // Check token age - CRITICAL: reject tokens with missing or invalid timestamps
+                match t.created_at.as_ref() {
+                    Some(created_at) => {
+                        match chrono::DateTime::parse_from_rfc3339(created_at) {
+                            Ok(created_time) => {
+                                let age_minutes = (now - created_time.with_timezone(&chrono::Utc)).num_minutes();
+                                if age_minutes < 0 || age_minutes as u64 > max_age_minutes {
+                                    debug!("   {} rejected: age {} min > {} max", t.symbol, age_minutes, max_age_minutes);
+                                    return false;
+                                }
+                            }
+                            Err(_) => {
+                                debug!("   {} rejected: unparseable created_at timestamp", t.symbol);
+                                return false;
+                            }
                         }
+                    }
+                    None => {
+                        debug!("   {} rejected: missing created_at timestamp - cannot verify age", t.symbol);
+                        return false;
                     }
                 }
 
@@ -294,7 +314,7 @@ impl MoralisClient {
 
             if holders >= min_holders {
                 info!("🔥 [FINAL STRETCH] {} ({}) - Progress: {:.1}%, MCap: ${:.0}, Holders: {}",
-                    token.name, token.symbol, token.bonding_progress(), token.market_cap_usd(), holders);
+                    token.name, token.symbol, token.bonding_progress().unwrap_or(0.0), token.market_cap_usd(), holders);
                 results.push(MoralisTokenWithHolders { token, holders });
             } else {
                 debug!("   {} rejected: {} holders < {} min", token.symbol, holders, min_holders);
@@ -336,13 +356,25 @@ impl MoralisClient {
                     return false;
                 }
 
-                // Check graduation age if timestamp available
-                if let Some(ref grad_at) = t.graduated_at {
-                    if let Ok(grad_time) = chrono::DateTime::parse_from_rfc3339(grad_at) {
-                        let age_hours = (now - grad_time.with_timezone(&chrono::Utc)).num_hours();
-                        if age_hours < 0 || age_hours as u64 > max_age_hours {
-                            return false;
+                // Check graduation age - MUST have graduated_at timestamp
+                match t.graduated_at.as_ref() {
+                    Some(grad_at) => {
+                        match chrono::DateTime::parse_from_rfc3339(grad_at) {
+                            Ok(grad_time) => {
+                                let age_hours = (now - grad_time.with_timezone(&chrono::Utc)).num_hours();
+                                if age_hours < 0 || age_hours as u64 > max_age_hours {
+                                    return false;
+                                }
+                            }
+                            Err(_) => {
+                                debug!("   {} rejected: unparseable graduated_at timestamp", t.symbol);
+                                return false;
+                            }
                         }
+                    }
+                    None => {
+                        debug!("   {} rejected: missing graduated_at timestamp - cannot verify age", t.symbol);
+                        return false;
                     }
                 }
 
@@ -398,6 +430,6 @@ mod tests {
         assert_eq!(token.token_address, "ABC123");
         assert_eq!(token.symbol, "TEST");
         assert!((token.market_cap_usd() - 25000.0).abs() < 0.01);
-        assert!((token.bonding_progress() - 45.5).abs() < 0.01);
+        assert!((token.bonding_progress().unwrap() - 45.5).abs() < 0.01);
     }
 }

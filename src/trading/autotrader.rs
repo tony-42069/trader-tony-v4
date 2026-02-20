@@ -628,6 +628,8 @@ impl AutoTrader {
                 min_market_cap_usd: None,
                 min_bonding_progress: None,
                 require_migrated: None,
+                min_buy_ratio_percent: 0.0,
+                min_unique_wallets_24h: None,
                 slippage_bps: None,
                 priority_fee_micro_lamports: None,
                 created_at: chrono::Utc::now(),
@@ -971,12 +973,14 @@ impl AutoTrader {
                         }
                     }
 
-                    // Regular scan cycle timer
+                    // Regular scan cycle timer (Helius DAS - only for NewPairs strategy)
                     _ = scan_interval.tick() => {
-                        // In dry_run mode, skip the DAS API scan - we use WebSocket discovery instead
-                        // The DAS API returns NFT metadata, not tradeable Pump.fun tokens
-                        if !config.dry_run_mode {
-                            // Run the regular scan cycle (uses Helius DAS for non-Pump.fun tokens)
+                        let current_strategy_for_scan = active_strategy_type.read().await.clone();
+
+                        // Only run Helius DAS scan for NewPairs strategy and when not in dry_run mode
+                        // FinalStretch and Migrated use the Moralis scanner (separate timer below)
+                        if !config.dry_run_mode && current_strategy_for_scan == crate::trading::strategy::StrategyType::NewPairs {
+                            // Run the regular scan cycle (uses Helius DAS for new token discovery)
                             if let Err(e) = run_scan_cycle(
                                 strategies.clone(),
                                 helius_client.clone(),
@@ -990,6 +994,8 @@ impl AutoTrader {
                                 error!("Error in scan cycle: {:?}", e);
                                 // Continue running even if one cycle fails
                             }
+                        } else if !config.dry_run_mode {
+                            debug!("Skipping Helius scan - active strategy is {:?}, not NewPairs", current_strategy_for_scan);
                         }
 
                         // In dry run mode, update prices and check exit conditions every 5 scan cycles
@@ -1046,6 +1052,9 @@ impl AutoTrader {
                                     drop(strats);
 
                                     if let Some(strategy) = matching_strategy {
+                                        // Fetch SOL price for USD->SOL conversion
+                                        let sol_price_usd = birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
+
                                         // Run the scanner
                                         match sc.scan_cycle(&strategy).await {
                                             Ok(candidates) => {
@@ -1055,6 +1064,13 @@ impl AutoTrader {
 
                                                     // Process each candidate
                                                     for candidate in candidates {
+                                                        // Convert USD price to SOL price for accurate simulation
+                                                        let price_sol = if sol_price_usd > 0.0 {
+                                                            candidate.price_usd / sol_price_usd
+                                                        } else {
+                                                            0.0
+                                                        };
+
                                                         // In dry run mode, simulate the trade
                                                         if config.dry_run_mode {
                                                             if let Some(ref sim_mgr) = simulation_manager {
@@ -1075,24 +1091,57 @@ impl AutoTrader {
                                                                         &candidate.token_address,
                                                                         &candidate.symbol,
                                                                         &candidate.name,
-                                                                        candidate.price_usd,
+                                                                        price_sol,
                                                                         strategy.max_position_size_sol,
                                                                         30, // Lower risk for tokens meeting criteria
                                                                         vec![entry_reason.clone()],
                                                                         entry_reason,
                                                                         strategy.id.clone(),
                                                                     ).await {
-                                                                        Ok(_) => info!("🎯 [DRY RUN] Simulated {:?} buy for {} ({})",
-                                                                            current_strategy_type, candidate.symbol, candidate.token_address),
+                                                                        Ok(_) => info!("🎯 [DRY RUN] Simulated {:?} buy for {} ({}) @ {:.10} SOL (${:.6} USD, SOL=${:.0})",
+                                                                            current_strategy_type, candidate.symbol, candidate.token_address, price_sol, candidate.price_usd, sol_price_usd),
                                                                         Err(e) => warn!("Failed to simulate buy for {}: {:?}", candidate.symbol, e),
                                                                     }
                                                                 }
                                                             }
                                                         } else {
-                                                            // Real mode - execute actual trade
-                                                            info!("🚀 [LIVE] Would execute {:?} buy for {} - implement real trade execution",
-                                                                current_strategy_type, candidate.symbol);
-                                                            // TODO: Implement real trade execution for Final Stretch / Migrated
+                                                            // Real mode - execute actual trade for scanner candidates
+                                                            let token_meta = crate::models::token::TokenMetadata {
+                                                                address: candidate.token_address.clone(),
+                                                                name: candidate.name.clone(),
+                                                                symbol: candidate.symbol.clone(),
+                                                                decimals: 9, // Pump.fun tokens are always 9 decimals
+                                                                supply: None,
+                                                                logo_uri: None,
+                                                                creation_time: None,
+                                                            };
+
+                                                            match should_execute_buy_task(&token_meta, &strategy, &position_manager).await {
+                                                                Ok(true) => {
+                                                                    info!("🚀 [LIVE] Executing {:?} buy for {} ({}) - MCap ${:.0}, Holders {}",
+                                                                        current_strategy_type, candidate.symbol, candidate.token_address,
+                                                                        candidate.market_cap_usd, candidate.holders);
+                                                                    match execute_buy_task(
+                                                                        &token_meta,
+                                                                        &strategy,
+                                                                        &position_manager,
+                                                                        &jupiter_client,
+                                                                        &wallet_manager,
+                                                                        &config,
+                                                                        None,
+                                                                    ).await {
+                                                                        Ok(result) => info!("🚀 [LIVE] Buy executed for {} - tx: {}",
+                                                                            candidate.symbol, result.transaction_signature),
+                                                                        Err(e) => error!("🚀 [LIVE] Buy failed for {}: {:?}", candidate.symbol, e),
+                                                                    }
+                                                                }
+                                                                Ok(false) => {
+                                                                    debug!("Buy conditions not met for {} (budget/position limits)", candidate.symbol);
+                                                                }
+                                                                Err(e) => {
+                                                                    error!("Error checking buy conditions for {}: {:?}", candidate.symbol, e);
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -1121,16 +1170,18 @@ impl AutoTrader {
                                             max_risk_level: 70,
                                             min_holders: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { 50 } else { 75 },
                                             max_token_age_minutes: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { 60 } else { 1440 },
-                                            require_lp_burned: false,
-                                            reject_if_mint_authority: false,
-                                            reject_if_freeze_authority: false,
-                                            require_can_sell: false,
+                                            require_lp_burned: current_strategy_type == crate::trading::strategy::StrategyType::Migrated,
+                                            reject_if_mint_authority: true,
+                                            reject_if_freeze_authority: true,
+                                            require_can_sell: true,
                                             max_transfer_tax_percent: Some(5.0),
-                                            max_concentration_percent: Some(90.0),
+                                            max_concentration_percent: Some(40.0),
                                             min_volume_usd: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(20_000.0) } else { Some(40_000.0) },
                                             min_market_cap_usd: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(20_000.0) } else { Some(40_000.0) },
                                             min_bonding_progress: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(20.0) } else { None },
                                             require_migrated: if current_strategy_type == crate::trading::strategy::StrategyType::Migrated { Some(true) } else { None },
+                                            min_buy_ratio_percent: 55.0,
+                                            min_unique_wallets_24h: Some(20),
                                             slippage_bps: None,
                                             priority_fee_micro_lamports: None,
                                             created_at: chrono::Utc::now(),
@@ -1143,12 +1194,22 @@ impl AutoTrader {
                                             default_strategy.min_market_cap_usd.unwrap_or(0.0),
                                             default_strategy.min_bonding_progress.unwrap_or(0.0));
 
+                                        // Fetch SOL price for USD->SOL conversion
+                                        let sol_price_usd = birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
+
                                         // Run scanner with default strategy
                                         match sc.scan_cycle(&default_strategy).await {
                                             Ok(candidates) => {
                                                 if !candidates.is_empty() {
                                                     info!("🎯 Scanner found {} candidates for {:?}", candidates.len(), current_strategy_type);
                                                     for candidate in candidates {
+                                                        // Convert USD price to SOL price
+                                                        let price_sol = if sol_price_usd > 0.0 {
+                                                            candidate.price_usd / sol_price_usd
+                                                        } else {
+                                                            0.0
+                                                        };
+
                                                         if config.dry_run_mode {
                                                             if let Some(ref sim_mgr) = simulation_manager {
                                                                 if !sim_mgr.has_open_position(&candidate.token_address).await {
@@ -1156,7 +1217,7 @@ impl AutoTrader {
                                                                         current_strategy_type, candidate.market_cap_usd, candidate.holders);
                                                                     let _ = sim_mgr.simulate_buy(
                                                                         &candidate.token_address, &candidate.symbol, &candidate.name,
-                                                                        candidate.price_usd, default_strategy.max_position_size_sol,
+                                                                        price_sol, default_strategy.max_position_size_sol,
                                                                         30, vec![entry_reason.clone()], entry_reason, default_strategy.id.clone(),
                                                                     ).await;
                                                                 }
@@ -1295,6 +1356,8 @@ impl AutoTrader {
             min_market_cap_usd: None,
             min_bonding_progress: None,
             require_migrated: None,
+            min_buy_ratio_percent: 0.0,
+            min_unique_wallets_24h: None,
             slippage_bps: None,
             priority_fee_micro_lamports: None,
             created_at: chrono::Utc::now(),
