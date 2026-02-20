@@ -153,12 +153,12 @@ impl Strategy {
             max_risk_level: 70,
             min_holders: 50,            // Minimum 50 holders
             max_token_age_minutes: 60,  // 0-60 minutes old
-            require_lp_burned: false,   // N/A for bonding curve
-            reject_if_mint_authority: false,
-            reject_if_freeze_authority: false,
-            require_can_sell: false,
-            max_transfer_tax_percent: None,
-            max_concentration_percent: None,
+            require_lp_burned: false,   // N/A for bonding curve (still on pump.fun)
+            reject_if_mint_authority: true,
+            reject_if_freeze_authority: true,
+            require_can_sell: true,
+            max_transfer_tax_percent: Some(5.0),
+            max_concentration_percent: Some(40.0),  // Top holder < 40%
             // Final Stretch specific criteria
             min_volume_usd: Some(20_000.0),      // $20k minimum volume
             min_market_cap_usd: Some(20_000.0),  // $20k minimum market cap
