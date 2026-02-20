@@ -234,7 +234,10 @@ impl BirdeyeClient {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             warn!("Birdeye SOL Price API error: {} - {}; using fallback $150", status, error_text);
-            return Ok(150.0); // Reasonable fallback instead of 0
+            // Cache the fallback to avoid repeated failed API calls
+            let mut cache = self.sol_price_cache.lock().unwrap();
+            *cache = Some(CachedValue { value: 150.0, fetched_at: Instant::now() });
+            return Ok(150.0);
         }
 
         let response_data: PriceResponse = match response.json().await {
