@@ -188,14 +188,14 @@ impl Scanner {
                     market_cap_usd: candidate.token.market_cap_usd(),
                     liquidity_usd: candidate.token.liquidity_usd(),
                     holders: candidate.holders,
-                    bonding_progress: Some(candidate.token.bonding_progress()),
+                    bonding_progress: candidate.token.bonding_progress(),
                     graduated_at: None,
                     strategy_type: StrategyType::FinalStretch,
                 });
 
                 info!("✅ [CANDIDATE] {} ({}) - Progress: {:.1}%, MCap: ${:.0}, Vol: ${:.0}, Holders: {}",
                     candidate.token.name, candidate.token.symbol,
-                    candidate.token.bonding_progress(), candidate.token.market_cap_usd(),
+                    candidate.token.bonding_progress().unwrap_or(0.0), candidate.token.market_cap_usd(),
                     volume, candidate.holders);
             }
 
