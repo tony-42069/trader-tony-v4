@@ -32,8 +32,9 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = Arc::new(Config::load()?);
-    info!("Configuration loaded successfully");
+    info!("Configuration loaded successfully (v4.1.0 - multi-strategy)");
     info!("Demo mode: {}", config.demo_mode);
+    info!("Dry run mode: {}", config.dry_run_mode);
 
     // Initialize Solana client
     let solana_client = Arc::new(SolanaClient::new(&config.solana_rpc_url)?);

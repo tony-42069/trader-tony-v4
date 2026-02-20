@@ -26,9 +26,7 @@ RUN mkdir src && \
 RUN cargo build --release && \
     rm -rf src target/release/trader-tony-v4*
 
-# Cache bust: any change to source files invalidates from here
-# Railway may aggressively cache COPY layers, so we use a build arg
-ARG CACHEBUST=1
+# Copy actual source code
 COPY src ./src
 
 # Build the actual application
@@ -56,15 +54,16 @@ RUN mkdir -p /app/data
 # Copy the compiled binary from builder
 COPY --from=builder /app/target/release/trader-tony-v4 /app/trader-tony-v4
 
+# Expose the API port (Railway routes to this port)
+EXPOSE 3030
+
 # Note: Railway uses its own health check (healthcheckPath in railway.toml)
 # Docker HEALTHCHECK removed as it requires curl which isn't in slim image
 
 # Default environment variables
 ENV RUST_LOG=info
 ENV API_HOST=0.0.0.0
-# DO NOT set API_PORT here - Railway sets PORT dynamically and our config
-# falls back to PORT when API_PORT is not set. Setting API_PORT here would
-# override Railway's port assignment and cause healthcheck failures.
+ENV API_PORT=3030
 
 # Run the application
 CMD ["./trader-tony-v4"]
