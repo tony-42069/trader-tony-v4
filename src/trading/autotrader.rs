@@ -597,52 +597,37 @@ impl AutoTrader {
         let mut strategies = self.strategies.write().await;
         *strategies = loaded_strategies;
 
-        // If no strategies loaded, create a default one for Pump.fun discovery
+        // If no strategies loaded, create defaults for all three strategy types
         if strategies.is_empty() {
-            info!("📋 No strategies found - creating default 'Pump.fun Scout' strategy...");
+            info!("📋 No strategies found - creating default strategies for all types...");
 
-            let default_strategy = Strategy {
-                id: uuid::Uuid::new_v4().to_string(),
-                name: "Pump.fun Scout".to_string(),
-                enabled: true,
-                strategy_type: crate::trading::strategy::StrategyType::NewPairs,
-                max_concurrent_positions: 5,
-                max_position_size_sol: 0.1,
-                total_budget_sol: 1.0,
-                stop_loss_percent: Some(20),
-                take_profit_percent: Some(50),
-                trailing_stop_percent: Some(10),
-                max_hold_time_minutes: 60,
-                min_liquidity_sol: 1,
-                max_risk_level: 70,
-                min_holders: 1,
-                max_token_age_minutes: 30,
-                require_lp_burned: false,
-                reject_if_mint_authority: false,
-                reject_if_freeze_authority: false,
-                require_can_sell: false,
-                max_transfer_tax_percent: Some(5.0),
-                max_concentration_percent: Some(90.0),
-                // NewPairs doesn't use these criteria
-                min_volume_usd: None,
-                min_market_cap_usd: None,
-                min_bonding_progress: None,
-                require_migrated: None,
-                min_buy_ratio_percent: 0.0,
-                min_unique_wallets_24h: None,
-                slippage_bps: None,
-                priority_fee_micro_lamports: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            };
+            // Create FinalStretch strategy (enabled by default)
+            let fs_strategy = Strategy::final_stretch("Final Stretch Scout");
+            info!("✅ Created '{}' strategy (enabled)", fs_strategy.name);
+            strategies.insert(fs_strategy.id.clone(), fs_strategy);
 
-            strategies.insert(default_strategy.id.clone(), default_strategy);
-            info!("✅ Default 'Pump.fun Scout' strategy created and enabled");
+            // Create Migrated strategy (enabled)
+            let mut mig_strategy = Strategy::migrated("Migrated Scout");
+            mig_strategy.enabled = true;
+            info!("✅ Created '{}' strategy (enabled)", mig_strategy.name);
+            strategies.insert(mig_strategy.id.clone(), mig_strategy);
 
-            // Save the default strategy to disk
+            // Create NewPairs strategy (disabled - too risky for default)
+            let mut np_strategy = Strategy::default("New Pairs Scout");
+            np_strategy.enabled = false;
+            info!("✅ Created '{}' strategy (disabled)", np_strategy.name);
+            strategies.insert(np_strategy.id.clone(), np_strategy);
+
+            // Set default active strategy to FinalStretch
+            let mut active = self.active_strategy_type.write().await;
+            *active = crate::trading::strategy::StrategyType::FinalStretch;
+            drop(active);
+            info!("📋 Default active strategy set to FinalStretch");
+
+            // Save the default strategies to disk
             drop(strategies); // Release lock before saving
             if let Err(e) = self.save_strategies().await {
-                warn!("Failed to save default strategy to disk: {}", e);
+                warn!("Failed to save default strategies to disk: {}", e);
             }
         } else {
             info!("Loaded {} strategies", strategies.len());
@@ -1180,8 +1165,8 @@ impl AutoTrader {
                                             require_can_sell: true,
                                             max_transfer_tax_percent: Some(5.0),
                                             max_concentration_percent: Some(40.0),
-                                            min_volume_usd: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(20_000.0) } else { Some(40_000.0) },
-                                            min_market_cap_usd: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(20_000.0) } else { Some(40_000.0) },
+                                            min_volume_usd: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(15_000.0) } else { Some(40_000.0) },
+                                            min_market_cap_usd: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(15_000.0) } else { Some(40_000.0) },
                                             min_bonding_progress: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(20.0) } else { None },
                                             require_migrated: if current_strategy_type == crate::trading::strategy::StrategyType::Migrated { Some(true) } else { None },
                                             min_buy_ratio_percent: 55.0,

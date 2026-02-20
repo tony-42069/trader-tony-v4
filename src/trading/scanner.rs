@@ -98,7 +98,7 @@ impl Scanner {
     }
 
     /// Validate a candidate against advanced trade data filters (buy/sell ratio, unique wallets, volume)
-    /// Returns (passed, volume) - fail-close: rejects if data can't be fetched
+    /// Returns (passed, volume) - FAIL-OPEN on API errors: allows candidate through if Birdeye is rate-limited
     async fn validate_trade_data(
         &self,
         addr: &str,
@@ -111,12 +111,15 @@ impl Scanner {
         let trade_data = match self.birdeye_client.get_trade_data(addr).await {
             Ok(Some(td)) => td,
             Ok(None) => {
-                info!("   {} rejected: no trade data available (likely zero activity)", symbol);
-                return (false, 0.0);
+                // Birdeye returned no data - could be rate limit or genuinely no data
+                // FAIL-OPEN: allow the candidate through, Moralis already validated basics
+                info!("   {} allowed: Birdeye returned no trade data (rate limit or new token)", symbol);
+                return (true, 0.0);
             }
             Err(e) => {
-                warn!("   {} rejected: failed to fetch trade data ({})", symbol, e);
-                return (false, 0.0);
+                // API error (rate limit, network, etc.) - FAIL-OPEN
+                warn!("   {} allowed despite Birdeye error: {} (fail-open)", symbol, e);
+                return (true, 0.0);
             }
         };
 
