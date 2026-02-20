@@ -11,7 +11,7 @@ startCommand = "./trader-tony-v4"
 
 # Health check endpoint for Railway
 healthcheckPath = "/api/health"
-healthcheckTimeout = 120
+healthcheckTimeout = 60
 
 # Number of replicas (keep at 1 for trading bot to avoid duplicate trades)
 numReplicas = 1
