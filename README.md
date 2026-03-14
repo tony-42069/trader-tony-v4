@@ -3,10 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.83%2B-orange.svg)](https://www.rust-lang.org/)
 [![Solana](https://img.shields.io/badge/Solana-1.17-blue.svg)](https://solana.com/)
-[![Web App](https://img.shields.io/badge/Web-Dashboard-purple.svg)](https://trader-tony.vercel.app)
+[![Web App](https://img.shields.io/badge/Web-Dashboard-purple.svg)](https://agenttony.xyz)
 
 An autonomous trading bot for Solana memecoins with multi-strategy token discovery, advanced risk analysis, and a cyberpunk-themed web dashboard.
 
+**Website**: https://agenttony.xyz  
 **Live Dashboard**: https://trader-tony.vercel.app  
 **API Backend**: https://trader-tony.up.railway.app
 
@@ -105,7 +106,7 @@ Follow TraderTony's trades with your own wallet on the web dashboard.
 - Track your copy positions and P&L separately
 
 **How to use:**
-1. Visit https://trader-tony.vercel.app
+1. Visit https://agenttony.xyz
 2. Connect your wallet (Phantom, Solflare, or Backpack)
 3. Enable copy trading in the dashboard
 4. Receive trade signals and execute copies manually
@@ -185,7 +186,7 @@ COPY_TRADE_FEE_PERCENT=10.0
 
 6. Open the dashboard:
    - Local: `webapp/index.html` (or use `python -m http.server 8080` in `webapp/`)
-   - Production: https://trader-tony.vercel.app
+   - Production: https://agenttony.xyz
 
 ---
 
@@ -259,7 +260,7 @@ COPY_TRADE_FEE_PERCENT=10.0
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  VERCEL (Frontend)                                              │
-│  https://trader-tony.vercel.app                                 │
+│  https://agenttony.xyz                                          │
 │  Cyberpunk dashboard with real-time charts                      │
 └──────────────────────────┬──────────────────────────────────────┘
                            │ HTTPS / WSS
