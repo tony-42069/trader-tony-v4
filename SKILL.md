@@ -92,6 +92,5 @@ Risk scores range from 0-100. Strategies only trade tokens below their risk thre
 ## Links
 
 - Website: https://agenttony.xyz
-- Dashboard: https://trader-tony.vercel.app
 - GitHub: https://github.com/tony-42069/trader-tony-v4
 - Network: Solana Mainnet-Beta

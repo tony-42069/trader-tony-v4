@@ -7,9 +7,7 @@
 
 An autonomous trading bot for Solana memecoins with multi-strategy token discovery, advanced risk analysis, and a cyberpunk-themed web dashboard.
 
-**Website**: https://agenttony.xyz  
-**Live Dashboard**: https://trader-tony.vercel.app  
-**API Backend**: https://trader-tony.up.railway.app
+**Website**: https://agenttony.xyz
 
 ---
 
