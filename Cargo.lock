@@ -5529,6 +5529,7 @@ dependencies = [
  "axum-extra",
  "base64 0.21.7",
  "bincode",
+ "borsh 0.10.4",
  "bs58 0.5.1",
  "chrono",
  "config",

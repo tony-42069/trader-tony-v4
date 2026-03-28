@@ -6,12 +6,21 @@ use tracing::{debug, error, info};
 
 use crate::models::token::TokenMetadata;
 
-const HELIUS_BASE_URL: &str = "https://api.helius.xyz";
+const HELIUS_RPC_URL: &str = "https://mainnet.helius-rpc.com";
 
 #[derive(Debug, Clone)]
 pub struct HeliusClient {
     api_key: String,
     client: Client,
+}
+
+/// JSON-RPC request wrapper for Helius DAS API
+#[derive(Debug, Serialize)]
+struct JsonRpcRequest<T> {
+    jsonrpc: &'static str,
+    id: &'static str,
+    method: &'static str,
+    params: T,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -135,21 +144,37 @@ pub struct DasLinks {
 #[derive(Debug, Deserialize, Serialize)]
 #[allow(non_snake_case)] // Allow non-snake-case fields for this struct mapping to API
 pub struct SearchAssetsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ownerAddress: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub creatorAddress: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
-    pub sortBy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sortBy: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sortDirection: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub burnt: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub delegate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub frozen: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub supplyMint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub grouping: Option<Vec<DasGrouping>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub groupValue: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compressed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compressible: Option<bool>,
 }
 
@@ -175,18 +200,18 @@ impl HeliusClient {
     }
     
     pub async fn search_assets(&self, owner_address: Option<&str>, limit: Option<u32>) -> Result<Vec<DasAsset>> {
-        // Corrected URL construction: Use v0 for DAS API, not v1
-        let url = format!("{}/v0/das/searchAssets?api-key={}", HELIUS_BASE_URL, self.api_key);
-        
-        let request = SearchAssetsRequest {
+        // Use JSON-RPC format for Helius DAS API
+        let url = format!("{}/?api-key={}", HELIUS_RPC_URL, self.api_key);
+
+        let params = SearchAssetsRequest {
             ownerAddress: owner_address.map(String::from),
             creatorAddress: None,
             limit: Some(limit.unwrap_or(100)),
-            page: None, // Using page 1 explicitly might be better than None
+            page: Some(1),
             before: None,
             after: None,
-            sortBy: Some("created".to_string()), // Ensure this field is valid for DAS API
-            sortDirection: Some("desc".to_string()),
+            sortBy: Some(serde_json::json!({"sortBy": "created", "sortDirection": "desc"})),
+            sortDirection: None,
             burnt: Some(false),
             delegate: None,
             frozen: None,
@@ -196,38 +221,45 @@ impl HeliusClient {
             compressed: None,
             compressible: None,
         };
-        
-        debug!("Searching for assets with Helius DAS: {:?}", request);
-        
+
+        let rpc_request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: "helius-search",
+            method: "searchAssets",
+            params: &params,
+        };
+
+        debug!("Searching for assets with Helius DAS (JSON-RPC): {:?}", params);
+
         let response = self.client
             .post(&url)
-            .json(&request)
+            .json(&rpc_request)
             .send()
             .await
             .context("Failed to send request to Helius DAS API")?;
-        
+
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             error!("Helius DAS API error: {} - {}", status, error_text);
             anyhow::bail!("Helius DAS API error: {} - {}", status, error_text);
         }
-        
-        // Changed response type to match the expected structure from Helius DAS API
+
+        // JSON-RPC response format
         #[derive(Debug, Deserialize)]
-        struct HeliusSearchResponse {
+        struct JsonRpcResponse {
             result: SearchAssetsResponse,
         }
 
-        let search_response_wrapper: HeliusSearchResponse = response
+        let rpc_response: JsonRpcResponse = response
             .json()
             .await
             .context("Failed to parse Helius DAS API response")?;
-        
-        let search_response = search_response_wrapper.result;
+
+        let search_response = rpc_response.result;
 
         debug!("Found {} assets via Helius DAS", search_response.items.len());
-        
+
         Ok(search_response.items)
     }
     
@@ -291,13 +323,28 @@ impl HeliusClient {
     
     /// Gets detailed token metadata for a specific token address
     pub async fn get_token_metadata(&self, token_address: &str) -> Result<TokenMetadata> {
-        // Use the getAsset endpoint to get detailed information about a specific asset
-        let url = format!("{}/v0/das/asset?api-key={}&id={}", HELIUS_BASE_URL, self.api_key, token_address);
+        // Use JSON-RPC format for Helius DAS API
+        let url = format!("{}/?api-key={}", HELIUS_RPC_URL, self.api_key);
 
         debug!("Fetching token metadata for: {}", token_address);
 
+        #[derive(Serialize)]
+        struct GetAssetParams {
+            id: String,
+        }
+
+        let rpc_request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: "helius-get-asset",
+            method: "getAsset",
+            params: GetAssetParams {
+                id: token_address.to_string(),
+            },
+        };
+
         let response = self.client
-            .get(&url)
+            .post(&url)
+            .json(&rpc_request)
             .send()
             .await
             .context("Failed to send request to Helius getAsset API")?;
@@ -310,11 +357,11 @@ impl HeliusClient {
         }
 
         #[derive(Debug, Deserialize)]
-        struct HeliusAssetResponse {
+        struct JsonRpcAssetResponse {
             result: DasAsset,
         }
 
-        let asset_response_wrapper: HeliusAssetResponse = response
+        let asset_response_wrapper: JsonRpcAssetResponse = response
             .json()
             .await
             .context("Failed to parse Helius getAsset API response")?;

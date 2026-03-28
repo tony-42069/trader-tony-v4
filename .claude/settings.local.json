@@ -4,7 +4,16 @@
       "Bash(git checkout:*)",
       "Bash(git stash:*)",
       "Bash(cargo check:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(curl:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(cargo build:*)",
+      "Bash(git revert:*)",
+      "Bash(cargo test:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(python:*)"
     ]
   }
 }

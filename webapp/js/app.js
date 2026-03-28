@@ -18,7 +18,12 @@ const App = {
         trades: [],
         wallet: null,
         autotraderStatus: null,
+        simulationStats: null,
+        simulatedPositions: [],
     },
+
+    // Dry run mode
+    dryRunMode: false,
 
     /**
      * Initialize the application
@@ -67,7 +72,9 @@ const App = {
             // Load initial data
             await this.loadAllData();
         } catch (error) {
-            console.warn('[App] Backend not available, switching to demo mode:', error.message);
+            console.error('[App] Backend connection FAILED:', error);
+            console.error('[App] Error message:', error.message);
+            console.error('[App] Tried to connect to:', API.baseUrl);
 
             // Enable demo mode
             this.enableDemoMode();
@@ -105,6 +112,7 @@ const App = {
                 this.loadPositions(),
                 this.loadTrades(),
                 this.loadAutotraderStatus(),
+                this.loadSimulationData(),
             ]);
         } catch (error) {
             console.error('[App] Error loading data:', error);
@@ -175,8 +183,47 @@ const App = {
             const status = await API.getAutotraderStatus();
             this.cache.autotraderStatus = status;
             this.updateAutotraderDisplay(status);
+
+            // Check if dry run mode is active
+            if (status.dry_run_mode) {
+                this.dryRunMode = true;
+            }
+
+            // Also load active strategy type and watchlist stats
+            await this.loadActiveStrategyType();
+            await this.loadWatchlistStats();
         } catch (error) {
             console.error('[App] Error loading autotrader status:', error);
+        }
+    },
+
+    /**
+     * Load simulation data (dry run mode)
+     */
+    async loadSimulationData() {
+        try {
+            // First check if dry run mode is active via stats endpoint
+            const statsResponse = await API.getSimulationStats();
+
+            if (statsResponse.dry_run_mode) {
+                this.dryRunMode = true;
+                this.cache.simulationStats = statsResponse.stats;
+
+                // Load simulated positions
+                const positionsResponse = await API.getSimulatedPositions();
+                this.cache.simulatedPositions = positionsResponse.positions || [];
+
+                // Show simulation section and update display
+                this.showSimulationSection(true);
+                this.updateSimulationDisplay(statsResponse.stats, this.cache.simulatedPositions);
+            } else {
+                this.dryRunMode = false;
+                this.showSimulationSection(false);
+            }
+        } catch (error) {
+            console.error('[App] Error loading simulation data:', error);
+            // If simulation endpoints fail, just hide the section
+            this.showSimulationSection(false);
         }
     },
 
@@ -357,6 +404,179 @@ const App = {
     },
 
     /**
+     * Show/hide simulation section
+     */
+    showSimulationSection(show) {
+        const section = document.getElementById('simulationSection');
+        if (section) {
+            section.style.display = show ? 'block' : 'none';
+        }
+    },
+
+    /**
+     * Update simulation display
+     */
+    updateSimulationDisplay(stats, positions) {
+        // Update stats with full metrics including wins, losses, best/worst
+        const elements = {
+            simTotalTrades: stats.total_simulated_trades || 0,
+            simWinRate: `${this.formatNumber(stats.win_rate || 0, 1)}%`,
+            simWinningTrades: stats.winning_trades || 0,
+            simLosingTrades: stats.losing_trades || 0,
+            simRealizedPnl: `${this.formatNumberSigned(stats.total_realized_pnl_sol || 0)} SOL`,
+            simUnrealizedPnl: `${this.formatNumberSigned(stats.total_unrealized_pnl_sol || 0)} SOL`,
+            simBestTrade: `${this.formatNumberSigned(stats.best_trade_pnl_percent || 0)}%`,
+            simWorstTrade: `${this.formatNumberSigned(stats.worst_trade_pnl_percent || 0)}%`,
+            simWouldHaveSpent: `${this.formatNumber(stats.would_have_spent_sol || 0, 3)} SOL`,
+            simWouldHaveReturned: `${this.formatNumber(stats.would_have_returned_sol || 0, 3)} SOL`,
+        };
+
+        for (const [id, value] of Object.entries(elements)) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.textContent = value;
+                // Add color to PnL and trade count values
+                if (id.includes('Pnl') || id === 'simBestTrade' || id === 'simWorstTrade') {
+                    const numValue = parseFloat(String(value).replace(/[^\d.-]/g, ''));
+                    el.className = `sim-stat-value ${numValue >= 0 ? 'positive' : 'negative'}`;
+                } else if (id === 'simWinningTrades') {
+                    el.className = 'sim-stat-value positive';
+                } else if (id === 'simLosingTrades') {
+                    el.className = `sim-stat-value ${(stats.losing_trades || 0) > 0 ? 'negative' : ''}`;
+                }
+            }
+        }
+
+        // Update simulated positions table
+        this.updateSimulatedPositionsTable(positions);
+    },
+
+    /**
+     * Update simulated positions table
+     */
+    updateSimulatedPositionsTable(positions) {
+        const tbody = document.getElementById('simulatedPositionsBody');
+        if (!tbody) return;
+
+        if (!positions || positions.length === 0) {
+            tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No simulated positions yet</td></tr>';
+            return;
+        }
+
+        // Sort: open positions first, then closed by exit time (most recent first)
+        const sorted = [...positions].sort((a, b) => {
+            if (a.status === 'Open' && b.status !== 'Open') return -1;
+            if (a.status !== 'Open' && b.status === 'Open') return 1;
+            // Both closed: sort by exit_time descending
+            if (a.exit_time && b.exit_time) return new Date(b.exit_time) - new Date(a.exit_time);
+            return 0;
+        });
+
+        tbody.innerHTML = sorted.map(pos => {
+            const isOpen = pos.status === 'Open';
+            // Use realized PnL for closed positions, unrealized for open
+            const pnlSol = isOpen ? (pos.unrealized_pnl_sol || 0) : (pos.realized_pnl_sol || pos.unrealized_pnl_sol || 0);
+            const pnlPct = isOpen ? (pos.unrealized_pnl_percent || 0) : (pos.realized_pnl_percent || pos.unrealized_pnl_percent || 0);
+            const pnlClass = pnlSol >= 0 ? 'positive' : 'negative';
+            const pnlLabel = isOpen ? '' : ' (realized)';
+
+            // Format status display
+            let statusDisplay;
+            if (isOpen) {
+                statusDisplay = `<button class="btn btn-sm btn-danger" onclick="App.closeSimulatedPosition('${pos.id}')">Close</button>`;
+            } else {
+                // Show exit reason for closed positions
+                const reason = pos.exit_reason || pos.status;
+                const statusClass = pnlSol >= 0 ? 'positive' : 'negative';
+                statusDisplay = `<span class="status-badge ${statusClass}" title="${reason}">${reason}</span>`;
+            }
+
+            return `
+                <tr class="${!isOpen ? 'closed-position' : ''}">
+                    <td>
+                        <div class="token-cell">
+                            <span class="token-symbol">${pos.token_symbol || 'Unknown'}</span>
+                            <span class="token-mint" title="${pos.token_address}">${this.shortenAddress(pos.token_address, 4)}</span>
+                        </div>
+                    </td>
+                    <td>${this.formatNumber(pos.entry_amount_sol, 4)} SOL</td>
+                    <td>${this.formatNumber(isOpen ? pos.current_value_sol : (pos.entry_amount_sol + pnlSol), 4)} SOL</td>
+                    <td class="${pnlClass}">
+                        ${this.formatNumberSigned(pnlSol)} SOL${pnlLabel}
+                        <span class="pnl-percent">(${this.formatNumberSigned(pnlPct)}%)</span>
+                    </td>
+                    <td>
+                        <span class="risk-score risk-${this.getRiskLevel(pos.risk_score)}">${pos.risk_score}/100</span>
+                    </td>
+                    <td title="${pos.selection_reason}">
+                        <span class="selection-reason">${this.truncate(pos.selection_reason, 20)}</span>
+                    </td>
+                    <td>${statusDisplay}</td>
+                </tr>
+            `;
+        }).join('');
+    },
+
+    /**
+     * Close a simulated position
+     */
+    async closeSimulatedPosition(positionId) {
+        try {
+            await API.closeSimulatedPosition(positionId);
+            this.showToast('Simulated position closed', 'success');
+            await this.loadSimulationData();
+        } catch (error) {
+            console.error('[App] Error closing simulated position:', error);
+            this.showToast('Failed to close position', 'error');
+        }
+    },
+
+    /**
+     * Clear all simulated positions
+     */
+    async clearSimulation() {
+        if (!confirm('Are you sure you want to clear all simulated positions? This cannot be undone.')) {
+            return;
+        }
+
+        try {
+            await API.clearSimulation();
+            this.showToast('All simulated positions cleared', 'success');
+            await this.loadSimulationData();
+        } catch (error) {
+            console.error('[App] Error clearing simulation:', error);
+            this.showToast('Failed to clear simulation', 'error');
+        }
+    },
+
+    /**
+     * Get risk level class from score
+     */
+    getRiskLevel(score) {
+        if (score <= 25) return 'low';
+        if (score <= 50) return 'medium';
+        if (score <= 75) return 'high';
+        return 'very-high';
+    },
+
+    /**
+     * Truncate string
+     */
+    truncate(str, maxLength) {
+        if (!str) return '';
+        return str.length > maxLength ? str.slice(0, maxLength) + '...' : str;
+    },
+
+    /**
+     * Format number with sign
+     */
+    formatNumberSigned(num, decimals = 3) {
+        if (num === null || num === undefined) return '-';
+        const formatted = this.formatNumber(Math.abs(num), decimals);
+        return num >= 0 ? `+${formatted}` : `-${formatted}`;
+    },
+
+    /**
      * Update connection status indicator
      */
     updateConnectionStatus(status) {
@@ -441,6 +661,12 @@ const App = {
             stopBtn.addEventListener('click', () => this.stopTrading());
         }
 
+        // Strategy type selector
+        const strategySelect = document.getElementById('strategyTypeSelect');
+        if (strategySelect) {
+            strategySelect.addEventListener('change', (e) => this.setActiveStrategyType(e.target.value));
+        }
+
         // Analyze token button
         const analyzeBtn = document.getElementById('analyzeTokenBtn');
         if (analyzeBtn) {
@@ -471,6 +697,12 @@ const App = {
         const enableCopyTradeBtn = document.getElementById('enableCopyTradeBtn');
         if (enableCopyTradeBtn) {
             enableCopyTradeBtn.addEventListener('click', () => this.handleEnableCopyTrade());
+        }
+
+        // Clear simulation button
+        const clearSimulationBtn = document.getElementById('clearSimulationBtn');
+        if (clearSimulationBtn) {
+            clearSimulationBtn.addEventListener('click', () => this.clearSimulation());
         }
     },
 
@@ -855,6 +1087,70 @@ const App = {
         if (diffDays < 7) return `${diffDays}d ago`;
 
         return date.toLocaleDateString();
+    },
+
+    // ========================================================================
+    // Active Strategy Type (Multi-Strategy Support)
+    // ========================================================================
+
+    /**
+     * Load the active strategy type from the backend
+     */
+    async loadActiveStrategyType() {
+        try {
+            const response = await API.getActiveStrategyType();
+            this.updateStrategyTypeDisplay(response);
+        } catch (error) {
+            console.error('[App] Error loading active strategy type:', error);
+        }
+    },
+
+    /**
+     * Set the active strategy type
+     */
+    async setActiveStrategyType(strategyType) {
+        try {
+            console.log(`[App] Setting active strategy type to: ${strategyType}`);
+            const response = await API.setActiveStrategyType(strategyType);
+            this.updateStrategyTypeDisplay(response);
+            this.showToast(`Strategy changed to: ${response.display_name}`, 'success');
+        } catch (error) {
+            console.error('[App] Error setting active strategy type:', error);
+            this.showToast('Failed to change strategy', 'error');
+            // Reload to restore the correct value
+            await this.loadActiveStrategyType();
+        }
+    },
+
+    /**
+     * Update the strategy type display
+     */
+    updateStrategyTypeDisplay(data) {
+        const select = document.getElementById('strategyTypeSelect');
+        const descriptionEl = document.getElementById('strategyDescription');
+
+        if (select && data.strategy_type) {
+            select.value = data.strategy_type;
+        }
+
+        if (descriptionEl && data.description) {
+            descriptionEl.textContent = data.description;
+        }
+    },
+
+    /**
+     * Load watchlist statistics
+     */
+    async loadWatchlistStats() {
+        try {
+            const stats = await API.getWatchlistStats();
+            const countEl = document.getElementById('watchlistCount');
+            if (countEl) {
+                countEl.textContent = stats.active_tokens || 0;
+            }
+        } catch (error) {
+            console.error('[App] Error loading watchlist stats:', error);
+        }
     },
 };
 

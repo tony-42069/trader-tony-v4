@@ -2,15 +2,12 @@
 # https://docs.railway.app/reference/config-as-code
 
 [build]
-# Use Nixpacks for automatic Rust detection and building
-builder = "nixpacks"
-
-# Build command - uses release profile for optimized binary
-buildCommand = "cargo build --release"
+# Use Dockerfile for building
+builder = "dockerfile"
 
 [deploy]
-# Start the compiled binary
-startCommand = "./target/release/trader-tony-v4"
+# Start command matches Dockerfile binary location
+startCommand = "./trader-tony-v4"
 
 # Health check endpoint for Railway
 healthcheckPath = "/api/health"

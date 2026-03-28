@@ -1,24 +1,31 @@
 use anyhow::{anyhow, Context, Result};
+use borsh::BorshDeserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::str::FromStr;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::interval;
 use chrono::Utc;
-use tracing::{debug, error, info, warn}; // Added debug
+use tracing::{debug, error, info, warn};
+use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 
-use crate::api::birdeye::BirdeyeClient; // Add BirdeyeClient import
+use crate::api::birdeye::BirdeyeClient;
 use crate::api::helius::HeliusClient;
 use crate::api::jupiter::{JupiterClient, SwapResult};
+use crate::api::moralis::MoralisClient;
 use crate::solana::client::SolanaClient;
 use crate::solana::wallet::WalletManager;
 use crate::config::Config;
-use crate::trading::position::PositionManager; // Assuming these exist
-use crate::trading::risk::{RiskAnalysis, RiskAnalyzer}; // Assuming these exist
+use crate::trading::position::PositionManager;
+use crate::trading::risk::{RiskAnalysis, RiskAnalyzer};
 use crate::trading::strategy::Strategy;
+use crate::trading::simulation::SimulationManager;
+use crate::trading::pumpfun::{PumpfunToken, BondingCurveState};
+use crate::trading::pumpfun_monitor::PumpfunMonitor;
+use crate::trading::graduation_monitor::{GraduationMonitor, GraduationEvent};
 use crate::models::token::TokenMetadata;
 use solana_sdk::signature::Signature;
 use solana_sdk::pubkey::Pubkey;
@@ -35,6 +42,7 @@ async fn run_scan_cycle(
     config: Arc<Config>,
     wallet_manager: Arc<WalletManager>,
     jupiter_client: Arc<JupiterClient>,
+    simulation_manager: Option<Arc<SimulationManager>>,
     // solana_client is implicitly used by risk_analyzer/position_manager/wallet_manager
 ) -> Result<()> {
     debug!("Scanning for trading opportunities...");
@@ -57,8 +65,13 @@ async fn run_scan_cycle(
         return Ok(());
     }
 
-    // --- Real Mode Scan ---
-    info!("Scanning for new tokens using Helius...");
+    // --- Dry Run or Real Mode Scan ---
+    // In dry run mode, we scan real tokens but simulate trades instead of executing
+    if config.dry_run_mode {
+        info!("🔍 [DRY RUN] Scanning for real tokens (simulation mode)...");
+    } else {
+        info!("Scanning for new tokens using Helius...");
+    }
     match helius_client.get_recent_tokens(60).await { // TODO: Make age configurable
         Ok(tokens) => {
             if tokens.is_empty() {
@@ -78,25 +91,65 @@ async fn run_scan_cycle(
 
                         for strategy in &enabled_strategies {
                             if meets_strategy_criteria(&token, &risk_analysis, strategy) {
-                                info!("Token {} meets criteria for strategy '{}'", token.symbol, strategy.name);
-                                if should_execute_buy_task(&token, strategy, &position_manager).await? { // Added ? for error handling
-                                    match execute_buy_task(
-                                        &token,
-                                        strategy,
-                                        &position_manager,
-                                        &jupiter_client,
-                                        &wallet_manager, // Pass WalletManager which holds SolanaClient
-                                        &config,
-                                        None, // Pass None for notification_manager
-                                    ).await {
-                                        Ok(_) => info!("Successfully executed buy and confirmed for {} via strategy '{}'", token.symbol, strategy.name),
-                                        Err(e) => error!("Failed to execute buy for {}: {:?}", token.symbol, e), // Error includes confirmation failure now
+                                info!("✅ [CANDIDATE] Token {} meets criteria for strategy '{}' - Risk: {}/100",
+                                    token.symbol, strategy.name, risk_analysis.risk_level);
+
+                                // DRY RUN MODE: Simulate the trade instead of executing
+                                if config.dry_run_mode {
+                                    if let Some(ref sim_mgr) = simulation_manager {
+                                        // Check if we already have a simulated position
+                                        if !sim_mgr.has_open_position(&token.address).await {
+                                            match sim_mgr.simulate_buy(
+                                                &token.address,
+                                                &token.symbol,
+                                                &token.name,
+                                                risk_analysis.liquidity_sol / 1000.0, // Estimate price from liquidity
+                                                strategy.max_position_size_sol,
+                                                risk_analysis.risk_level,
+                                                risk_analysis.details.clone(),
+                                                format!("Passed '{}' strategy criteria", strategy.name),
+                                                strategy.id.clone(),
+                                            ).await {
+                                                Ok(_) => info!("🔍 [DRY RUN] Successfully simulated buy for {} via strategy '{}'", token.symbol, strategy.name),
+                                                Err(e) => warn!("🔍 [DRY RUN] Failed to simulate buy for {}: {:?}", token.symbol, e),
+                                            }
+                                        } else {
+                                            debug!("🔍 [DRY RUN] Already have simulated position for {}", token.symbol);
+                                        }
                                     }
                                 } else {
-                                     debug!("Buy condition not met for token {} and strategy '{}'", token.symbol, strategy.name);
+                                    // REAL MODE: Execute actual trade
+                                    if should_execute_buy_task(&token, strategy, &position_manager).await? {
+                                        match execute_buy_task(
+                                            &token,
+                                            strategy,
+                                            &position_manager,
+                                            &jupiter_client,
+                                            &wallet_manager,
+                                            &config,
+                                            None,
+                                        ).await {
+                                            Ok(_) => info!("Successfully executed buy and confirmed for {} via strategy '{}'", token.symbol, strategy.name),
+                                            Err(e) => error!("Failed to execute buy for {}: {:?}", token.symbol, e),
+                                        }
+                                    } else {
+                                        debug!("Buy condition not met for token {} and strategy '{}'", token.symbol, strategy.name);
+                                    }
                                 }
                             } else {
-                                 debug!("Token {} does not meet criteria for strategy '{}'", token.symbol, strategy.name);
+                                // Enhanced logging for rejected tokens
+                                if risk_analysis.risk_level > strategy.max_risk_level {
+                                    info!("❌ [REJECT] {} - Risk too high: {}/100 (max: {})",
+                                        token.symbol, risk_analysis.risk_level, strategy.max_risk_level);
+                                } else if risk_analysis.liquidity_sol < strategy.min_liquidity_sol as f64 {
+                                    info!("❌ [REJECT] {} - Liquidity too low: {:.2} SOL (min: {})",
+                                        token.symbol, risk_analysis.liquidity_sol, strategy.min_liquidity_sol);
+                                } else if risk_analysis.holder_count < strategy.min_holders {
+                                    info!("❌ [REJECT] {} - Not enough holders: {} (min: {})",
+                                        token.symbol, risk_analysis.holder_count, strategy.min_holders);
+                                } else {
+                                    debug!("Token {} does not meet criteria for strategy '{}'", token.symbol, strategy.name);
+                                }
                             }
                         }
                     }
@@ -379,12 +432,14 @@ async fn execute_buy_task(
 pub struct AutoTrader {
     wallet_manager: Arc<WalletManager>,
     solana_client: Arc<SolanaClient>,
-    helius_client: Arc<HeliusClient>, // Use Arc for clients too if shared
-    jupiter_client: Arc<JupiterClient>, // Use Arc
+    helius_client: Arc<HeliusClient>,
+    jupiter_client: Arc<JupiterClient>,
     birdeye_client: Arc<BirdeyeClient>,
+    moralis_client: Option<Arc<MoralisClient>>,
     config: Arc<Config>,
     pub position_manager: Arc<PositionManager>, // Expose for references
     pub risk_analyzer: Arc<RiskAnalyzer>, // Expose for /analyze commands
+    pub simulation_manager: Option<Arc<SimulationManager>>, // For DRY_RUN_MODE
     is_running: Arc<AtomicBool>,
     // notification_tx will be used for WebSocket broadcasts in future
     // notification_tx: Option<broadcast::Sender<WsMessage>>,
@@ -392,6 +447,17 @@ pub struct AutoTrader {
     running: Arc<RwLock<bool>>, // Use Arc<RwLock<..>>
     task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     strategies_path: PathBuf,
+
+    // Pump.fun real-time discovery (for DRY_RUN_MODE)
+    pumpfun_token_rx: Arc<Mutex<Option<mpsc::Receiver<PumpfunToken>>>>,
+    graduation_rx: Arc<Mutex<Option<mpsc::Receiver<GraduationEvent>>>>,
+    pumpfun_monitor: Arc<Mutex<Option<PumpfunMonitor>>>,
+    graduation_monitor: Arc<Mutex<Option<GraduationMonitor>>>,
+
+    // Multi-strategy support (NewPairs, FinalStretch, Migrated)
+    active_strategy_type: Arc<RwLock<crate::trading::strategy::StrategyType>>,
+    watchlist: Arc<crate::trading::watchlist::Watchlist>,
+    scanner: Arc<Mutex<Option<crate::trading::scanner::Scanner>>>,
 }
 
 impl AutoTrader {
@@ -410,6 +476,15 @@ impl AutoTrader {
             .context("BIRDEYE_API_KEY is required but missing in config")?;
         let birdeye_client = Arc::new(BirdeyeClient::new(birdeye_api_key));
 
+        // Initialize MoralisClient if API key is available
+        let moralis_client = config.moralis_api_key.as_ref().map(|key| {
+            info!("📡 Moralis API configured - Final Stretch/Migrated scanning enabled");
+            Arc::new(MoralisClient::new(key))
+        });
+        if moralis_client.is_none() {
+            warn!("⚠️ MORALIS_API_KEY not set - Final Stretch/Migrated strategies will not work");
+        }
+
         let risk_analyzer = Arc::new(RiskAnalyzer::new(
             solana_client.clone(),
             helius_client.clone(),
@@ -423,25 +498,55 @@ impl AutoTrader {
             solana_client.clone(),
             config.clone(),
         )); // Corrected syntax: Ensure this parenthesis closes Arc::new
-        
+
+        // Initialize SimulationManager if dry_run_mode is enabled
+        let simulation_manager = if config.dry_run_mode {
+            info!("🔍 [DRY RUN] Mode enabled - trades will be simulated, not executed");
+            let sim_mgr = Arc::new(SimulationManager::new(birdeye_client.clone()));
+            // Load existing simulated positions
+            if let Err(e) = sim_mgr.load().await {
+                warn!("Failed to load simulated positions: {}", e);
+            }
+            Some(sim_mgr)
+        } else {
+            None
+        };
+
         // Set the default path for strategy persistence
         let strategies_path = PathBuf::from("data/strategies.json");
-        
+
+        // Initialize watchlist and load existing tokens
+        let watchlist = Arc::new(crate::trading::watchlist::Watchlist::new());
+        if let Err(e) = watchlist.load().await {
+            warn!("Failed to load watchlist: {}", e);
+        }
+
         // Create AutoTrader instance
         let autotrader = Self {
             wallet_manager,
-            solana_client,
+            solana_client: solana_client.clone(),
             helius_client,
             jupiter_client,
-            birdeye_client,
-            config,
+            birdeye_client: birdeye_client.clone(),
+            moralis_client: moralis_client.clone(),
+            config: config.clone(),
             position_manager,
             risk_analyzer,
+            simulation_manager,
             is_running: Arc::new(AtomicBool::new(false)),
             strategies: Arc::new(RwLock::new(HashMap::new())), // Start with empty map, will load in init
             running: Arc::new(RwLock::new(false)),
             task_handle: Arc::new(Mutex::new(None)),
             strategies_path,
+            // Pump.fun discovery initialized to None - will be set up in init_pumpfun_discovery()
+            pumpfun_token_rx: Arc::new(Mutex::new(None)),
+            graduation_rx: Arc::new(Mutex::new(None)),
+            pumpfun_monitor: Arc::new(Mutex::new(None)),
+            graduation_monitor: Arc::new(Mutex::new(None)),
+            // Multi-strategy support
+            active_strategy_type: Arc::new(RwLock::new(crate::trading::strategy::StrategyType::NewPairs)),
+            watchlist,
+            scanner: Arc::new(Mutex::new(None)), // Scanner initialized in start() when needed
         };
         
         // Initialize by loading strategies - use await directly since we're in an async function
@@ -491,8 +596,43 @@ impl AutoTrader {
         // Update the in-memory HashMap
         let mut strategies = self.strategies.write().await;
         *strategies = loaded_strategies;
-        
-        info!("Loaded {} strategies", strategies.len());
+
+        // If no strategies loaded, create defaults for all three strategy types
+        if strategies.is_empty() {
+            info!("📋 No strategies found - creating default strategies for all types...");
+
+            // Create FinalStretch strategy (enabled by default)
+            let fs_strategy = Strategy::final_stretch("Final Stretch Scout");
+            info!("✅ Created '{}' strategy (enabled)", fs_strategy.name);
+            strategies.insert(fs_strategy.id.clone(), fs_strategy);
+
+            // Create Migrated strategy (enabled)
+            let mut mig_strategy = Strategy::migrated("Migrated Scout");
+            mig_strategy.enabled = true;
+            info!("✅ Created '{}' strategy (enabled)", mig_strategy.name);
+            strategies.insert(mig_strategy.id.clone(), mig_strategy);
+
+            // Create NewPairs strategy (disabled - too risky for default)
+            let mut np_strategy = Strategy::default("New Pairs Scout");
+            np_strategy.enabled = false;
+            info!("✅ Created '{}' strategy (disabled)", np_strategy.name);
+            strategies.insert(np_strategy.id.clone(), np_strategy);
+
+            // Set default active strategy to FinalStretch
+            let mut active = self.active_strategy_type.write().await;
+            *active = crate::trading::strategy::StrategyType::FinalStretch;
+            drop(active);
+            info!("📋 Default active strategy set to FinalStretch");
+
+            // Save the default strategies to disk
+            drop(strategies); // Release lock before saving
+            if let Err(e) = self.save_strategies().await {
+                warn!("Failed to save default strategies to disk: {}", e);
+            }
+        } else {
+            info!("Loaded {} strategies", strategies.len());
+        }
+
         Ok(())
     }
     
@@ -614,6 +754,45 @@ impl AutoTrader {
         strategies.values().cloned().collect()
     }
 
+    // --- Active Strategy Type Management ---
+
+    /// Get the currently active strategy type
+    pub async fn get_active_strategy_type(&self) -> crate::trading::strategy::StrategyType {
+        self.active_strategy_type.read().await.clone()
+    }
+
+    /// Set the active strategy type
+    /// This determines which discovery method is used:
+    /// - NewPairs: WebSocket CreateEvent monitoring (sniper)
+    /// - FinalStretch/Migrated: Scanner with Birdeye data
+    pub async fn set_active_strategy_type(&self, strategy_type: crate::trading::strategy::StrategyType) -> Result<()> {
+        let old_type = self.get_active_strategy_type().await;
+        if old_type == strategy_type {
+            debug!("Strategy type already set to {:?}", strategy_type);
+            return Ok(());
+        }
+
+        info!("🔄 Switching active strategy from {:?} to {:?}", old_type, strategy_type);
+
+        // Update the strategy type
+        let mut active = self.active_strategy_type.write().await;
+        *active = strategy_type.clone();
+        drop(active);
+
+        info!("✅ Active strategy type set to: {:?}", strategy_type);
+        Ok(())
+    }
+
+    /// Get watchlist reference
+    pub fn get_watchlist(&self) -> Arc<crate::trading::watchlist::Watchlist> {
+        self.watchlist.clone()
+    }
+
+    /// Get watchlist statistics
+    pub async fn get_watchlist_stats(&self) -> crate::trading::watchlist::WatchlistStats {
+        self.watchlist.get_stats().await
+    }
+
     // TODO: Add method to set WebSocket broadcast channel for notifications
     // pub fn set_notification_tx(&mut self, tx: broadcast::Sender<WsMessage>) {
     //     self.notification_tx = Some(tx);
@@ -642,6 +821,20 @@ impl AutoTrader {
         // Assuming it takes Arc<Self> based on previous implementation attempt
         self.position_manager.clone().start_monitoring().await?;
 
+        // Initialize and start Pump.fun discovery ONLY for NewPairs strategy in dry run mode
+        // FinalStretch and Migrated use the Moralis scanner instead
+        let current_strategy = self.get_active_strategy_type().await;
+        if self.config.dry_run_mode && current_strategy == crate::trading::strategy::StrategyType::NewPairs {
+            info!("🔍 [DRY RUN] Initializing Pump.fun real-time discovery (NewPairs mode)...");
+            if let Err(e) = self.init_pumpfun_discovery().await {
+                warn!("Failed to initialize Pump.fun discovery: {:?}", e);
+            } else if let Err(e) = self.start_pumpfun_discovery().await {
+                warn!("Failed to start Pump.fun discovery: {:?}", e);
+            }
+        } else if self.config.dry_run_mode {
+            info!("📡 [DRY RUN] Strategy is {:?} - skipping Pump.fun WebSocket, using Moralis scanner", current_strategy);
+        }
+
         // Set running flag to true
         *running_guard = true;
         // Drop the write guard before spawning the task
@@ -658,35 +851,380 @@ impl AutoTrader {
         let config = self.config.clone();
         let wallet_manager = self.wallet_manager.clone();
         let jupiter_client = self.jupiter_client.clone();
-        // Need solana_client too for RiskAnalyzer/PositionManager potentially
-        // solana_client is used implicitly by other components
+        let simulation_manager = self.simulation_manager.clone();
+        let moralis_client = self.moralis_client.clone();
+        let birdeye_client = self.birdeye_client.clone();
 
+
+        // Take the Pump.fun token receiver for use in the task (if in dry run mode)
+        let pumpfun_token_rx = if config.dry_run_mode {
+            let mut rx_guard = self.pumpfun_token_rx.lock().await;
+            rx_guard.take()
+        } else {
+            None
+        };
+
+        // Clone watchlist for use in the task
+        let watchlist = self.watchlist.clone();
+
+        // Clone active_strategy_type for use in the task
+        let active_strategy_type = self.active_strategy_type.clone();
+
+        // Clone config API key for RPC client in token processing
+        let helius_api_key = config.helius_api_key.clone();
 
         let handle = tokio::spawn(async move {
             // Main scanning loop
-            let mut interval = interval(Duration::from_secs(60)); // Scan every 60 seconds
+            let mut scan_interval = interval(Duration::from_secs(60)); // Scan every 60 seconds
+            let mut moralis_scan_interval = interval(Duration::from_secs(30)); // Moralis scan every 30 seconds (reduced from 15 to avoid Birdeye rate limits)
+            let mut price_update_counter: u32 = 0;
+
+            // Create RPC client for Pump.fun token processing
+            let rpc_client = if config.dry_run_mode {
+                Some(SolanaRpcClient::new(format!(
+                    "https://mainnet.helius-rpc.com/?api-key={}",
+                    helius_api_key
+                )))
+            } else {
+                None
+            };
+
+            // Create scanner for Final Stretch / Migrated strategies if Moralis is available
+            let scanner = moralis_client.as_ref().map(|mc| {
+                info!("📡 Moralis scanner created - will poll every 15 seconds for FinalStretch/Migrated");
+                crate::trading::scanner::Scanner::new(mc.clone(), birdeye_client.clone())
+            });
+            if scanner.is_none() {
+                warn!("⚠️ Moralis scanner NOT created - moralis_client is None");
+            }
+
+            // Wrap the receiver in an Option so we can use it in the select!
+            let mut token_rx = pumpfun_token_rx;
 
             loop {
-                interval.tick().await;
-
                 // Check if we should stop
                 if !*running_flag.read().await {
                     info!("AutoTrader scanning task stopped.");
                     break;
                 }
 
-                // Run the scan cycle
-                if let Err(e) = run_scan_cycle(
-                    strategies.clone(),
-                    helius_client.clone(),
-                    risk_analyzer.clone(),
-                    position_manager.clone(),
-                    config.clone(),
-                    wallet_manager.clone(),
-                    jupiter_client.clone(),
-                ).await {
-                    error!("Error in scan cycle: {:?}", e);
-                    // Continue running even if one cycle fails
+                // Use tokio::select! to handle both timer events and incoming tokens
+                tokio::select! {
+                    // Handle Pump.fun token discovery (dry run mode only)
+                    token = async {
+                        if let Some(ref mut rx) = token_rx {
+                            rx.recv().await
+                        } else {
+                            // If no receiver, wait forever (this branch won't be selected)
+                            std::future::pending::<Option<PumpfunToken>>().await
+                        }
+                    } => {
+                        if let Some(token) = token {
+                            info!("📥 Received token from WebSocket channel: {} ({})", token.symbol, token.mint);
+
+                            // Check active strategy type to determine if we should evaluate for trading
+                            let current_strategy_type = active_strategy_type.read().await.clone();
+                            let evaluate_for_trading = current_strategy_type == crate::trading::strategy::StrategyType::NewPairs;
+
+                            if !evaluate_for_trading {
+                                info!("📋 Strategy mode is {:?} - adding {} to watchlist only (no immediate trade evaluation)",
+                                    current_strategy_type, token.symbol);
+                            }
+
+                            // Process the discovered token
+                            if let (Some(ref sim_mgr), Some(ref rpc)) = (&simulation_manager, &rpc_client) {
+                                // Only get NewPairs strategies when evaluating for trading
+                                let enabled_strategies: Vec<Strategy> = if evaluate_for_trading {
+                                    let strats = strategies.read().await;
+                                    strats.values()
+                                        .filter(|s| s.enabled && s.strategy_type == crate::trading::strategy::StrategyType::NewPairs)
+                                        .cloned()
+                                        .collect()
+                                } else {
+                                    Vec::new() // No strategies needed when just adding to watchlist
+                                };
+
+                                if let Err(e) = AutoTrader::process_pumpfun_token(
+                                    &token,
+                                    &enabled_strategies,
+                                    sim_mgr,
+                                    rpc,
+                                    Some(&watchlist),
+                                    evaluate_for_trading,
+                                ).await {
+                                    warn!("Error processing Pump.fun token {}: {:?}", token.symbol, e);
+                                }
+                            } else {
+                                warn!("Cannot process token - simulation_manager or rpc_client not available");
+                            }
+                        } else {
+                            warn!("Token channel closed - no more tokens will be received");
+                        }
+                    }
+
+                    // Regular scan cycle timer (Helius DAS - only for NewPairs strategy)
+                    _ = scan_interval.tick() => {
+                        let current_strategy_for_scan = active_strategy_type.read().await.clone();
+
+                        // Only run Helius DAS scan for NewPairs strategy and when not in dry_run mode
+                        // FinalStretch and Migrated use the Moralis scanner (separate timer below)
+                        if !config.dry_run_mode && current_strategy_for_scan == crate::trading::strategy::StrategyType::NewPairs {
+                            // Run the regular scan cycle (uses Helius DAS for new token discovery)
+                            if let Err(e) = run_scan_cycle(
+                                strategies.clone(),
+                                helius_client.clone(),
+                                risk_analyzer.clone(),
+                                position_manager.clone(),
+                                config.clone(),
+                                wallet_manager.clone(),
+                                jupiter_client.clone(),
+                                simulation_manager.clone(),
+                            ).await {
+                                error!("Error in scan cycle: {:?}", e);
+                                // Continue running even if one cycle fails
+                            }
+                        } else if !config.dry_run_mode {
+                            debug!("Skipping Helius scan - active strategy is {:?}, not NewPairs", current_strategy_for_scan);
+                        }
+
+                        // In dry run mode, update prices and check exit conditions every 5 scan cycles
+                        if config.dry_run_mode {
+                            price_update_counter += 1;
+                            if price_update_counter >= 5 {
+                                price_update_counter = 0;
+                                if let Some(ref sim_mgr) = simulation_manager {
+                                    // Update prices for all open simulated positions
+                                    if let Err(e) = sim_mgr.update_prices().await {
+                                        warn!("🔍 [DRY RUN] Failed to update simulated prices: {}", e);
+                                    }
+
+                                    // Check exit conditions using default strategy settings
+                                    let stop_loss = config.default_stop_loss_percent as f64;
+                                    let take_profit = config.default_take_profit_percent as f64;
+                                    let trailing_stop = Some(config.default_trailing_stop_percent as f64);
+                                    let max_hold = Some(config.max_hold_time_minutes);
+
+                                    match sim_mgr.check_exit_conditions(
+                                        stop_loss,
+                                        take_profit,
+                                        trailing_stop,
+                                        max_hold,
+                                    ).await {
+                                        Ok(closed) => {
+                                            if !closed.is_empty() {
+                                                info!("🔍 [DRY RUN] Closed {} simulated positions", closed.len());
+                                            }
+                                        }
+                                        Err(e) => warn!("🔍 [DRY RUN] Failed to check exit conditions: {}", e),
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Moralis scanner for Final Stretch / Migrated strategies
+                    _ = moralis_scan_interval.tick() => {
+                        // Only run if we have a scanner and are in FinalStretch or Migrated mode
+                        let current_strategy_type = active_strategy_type.read().await.clone();
+                        info!("⏰ Moralis scan interval tick - strategy: {:?}, scanner exists: {}",
+                            current_strategy_type, scanner.is_some());
+
+                        if let Some(ref sc) = scanner {
+                            match current_strategy_type {
+                                crate::trading::strategy::StrategyType::FinalStretch |
+                                crate::trading::strategy::StrategyType::Migrated => {
+                                    // Get strategy for scanning
+                                    let strats = strategies.read().await;
+                                    let matching_strategy = strats.values()
+                                        .find(|s| s.enabled && s.strategy_type == current_strategy_type)
+                                        .cloned();
+                                    drop(strats);
+
+                                    if let Some(strategy) = matching_strategy {
+                                        // Fetch SOL price for USD->SOL conversion
+                                        let sol_price_usd = birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
+
+                                        // Run the scanner
+                                        match sc.scan_cycle(&strategy).await {
+                                            Ok(candidates) => {
+                                                if !candidates.is_empty() {
+                                                    info!("🎯 Scanner found {} candidates for {:?}",
+                                                        candidates.len(), current_strategy_type);
+
+                                                    // Process each candidate
+                                                    for candidate in candidates {
+                                                        // Convert USD price to SOL price for accurate simulation
+                                                        let price_sol = if sol_price_usd > 0.0 {
+                                                            candidate.price_usd / sol_price_usd
+                                                        } else {
+                                                            0.0
+                                                        };
+
+                                                        // In dry run mode, simulate the trade
+                                                        if config.dry_run_mode {
+                                                            if let Some(ref sim_mgr) = simulation_manager {
+                                                                if !sim_mgr.has_open_position(&candidate.token_address).await {
+                                                                    let entry_reason = match current_strategy_type {
+                                                                        crate::trading::strategy::StrategyType::FinalStretch =>
+                                                                            format!("Final Stretch: Progress {:.1}%, MCap ${:.0}, Holders {}",
+                                                                                candidate.bonding_progress.unwrap_or(0.0),
+                                                                                candidate.market_cap_usd,
+                                                                                candidate.holders),
+                                                                        crate::trading::strategy::StrategyType::Migrated =>
+                                                                            format!("Migrated: MCap ${:.0}, Holders {}",
+                                                                                candidate.market_cap_usd, candidate.holders),
+                                                                        _ => "Unknown strategy".to_string(),
+                                                                    };
+
+                                                                    match sim_mgr.simulate_buy(
+                                                                        &candidate.token_address,
+                                                                        &candidate.symbol,
+                                                                        &candidate.name,
+                                                                        price_sol,
+                                                                        strategy.max_position_size_sol,
+                                                                        30, // Lower risk for tokens meeting criteria
+                                                                        vec![entry_reason.clone()],
+                                                                        entry_reason,
+                                                                        strategy.id.clone(),
+                                                                    ).await {
+                                                                        Ok(_) => info!("🎯 [DRY RUN] Simulated {:?} buy for {} ({}) @ {:.10} SOL (${:.6} USD, SOL=${:.0})",
+                                                                            current_strategy_type, candidate.symbol, candidate.token_address, price_sol, candidate.price_usd, sol_price_usd),
+                                                                        Err(e) => warn!("Failed to simulate buy for {}: {:?}", candidate.symbol, e),
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else {
+                                                            // Real mode - execute actual trade for scanner candidates
+                                                            let token_meta = crate::models::token::TokenMetadata {
+                                                                address: candidate.token_address.clone(),
+                                                                name: candidate.name.clone(),
+                                                                symbol: candidate.symbol.clone(),
+                                                                decimals: 9, // Pump.fun tokens are always 9 decimals
+                                                                supply: None,
+                                                                logo_uri: None,
+                                                                creation_time: None,
+                                                            };
+
+                                                            match should_execute_buy_task(&token_meta, &strategy, &position_manager).await {
+                                                                Ok(true) => {
+                                                                    info!("🚀 [LIVE] Executing {:?} buy for {} ({}) - MCap ${:.0}, Holders {}",
+                                                                        current_strategy_type, candidate.symbol, candidate.token_address,
+                                                                        candidate.market_cap_usd, candidate.holders);
+                                                                    match execute_buy_task(
+                                                                        &token_meta,
+                                                                        &strategy,
+                                                                        &position_manager,
+                                                                        &jupiter_client,
+                                                                        &wallet_manager,
+                                                                        &config,
+                                                                        None,
+                                                                    ).await {
+                                                                        Ok(result) => info!("🚀 [LIVE] Buy executed for {} - tx: {}",
+                                                                            candidate.symbol, result.transaction_signature),
+                                                                        Err(e) => error!("🚀 [LIVE] Buy failed for {}: {:?}", candidate.symbol, e),
+                                                                    }
+                                                                }
+                                                                Ok(false) => {
+                                                                    debug!("Buy conditions not met for {} (budget/position limits)", candidate.symbol);
+                                                                }
+                                                                Err(e) => {
+                                                                    error!("Error checking buy conditions for {}: {:?}", candidate.symbol, e);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Scanner error for {:?}: {:?}", current_strategy_type, e);
+                                            }
+                                        }
+                                    } else {
+                                        warn!("⚠️ No enabled {:?} strategy found! Create one in the UI or use default criteria.", current_strategy_type);
+
+                                        // Use default criteria if no strategy is defined
+                                        let default_strategy = Strategy {
+                                            id: format!("default-{:?}", current_strategy_type).to_lowercase(),
+                                            name: format!("Default {:?}", current_strategy_type),
+                                            enabled: true,
+                                            strategy_type: current_strategy_type.clone(),
+                                            max_concurrent_positions: 5,
+                                            max_position_size_sol: 0.1,
+                                            total_budget_sol: 1.0,
+                                            stop_loss_percent: Some(20),
+                                            take_profit_percent: Some(50),
+                                            trailing_stop_percent: Some(10),
+                                            max_hold_time_minutes: 60,
+                                            min_liquidity_sol: 1,
+                                            max_risk_level: 70,
+                                            min_holders: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { 50 } else { 75 },
+                                            max_token_age_minutes: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { 60 } else { 1440 },
+                                            require_lp_burned: current_strategy_type == crate::trading::strategy::StrategyType::Migrated,
+                                            reject_if_mint_authority: true,
+                                            reject_if_freeze_authority: true,
+                                            require_can_sell: true,
+                                            max_transfer_tax_percent: Some(5.0),
+                                            max_concentration_percent: Some(40.0),
+                                            min_volume_usd: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(15_000.0) } else { Some(40_000.0) },
+                                            min_market_cap_usd: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(15_000.0) } else { Some(40_000.0) },
+                                            min_bonding_progress: if current_strategy_type == crate::trading::strategy::StrategyType::FinalStretch { Some(20.0) } else { None },
+                                            require_migrated: if current_strategy_type == crate::trading::strategy::StrategyType::Migrated { Some(true) } else { None },
+                                            min_buy_ratio_percent: 55.0,
+                                            min_unique_wallets_24h: Some(20),
+                                            slippage_bps: None,
+                                            priority_fee_micro_lamports: None,
+                                            created_at: chrono::Utc::now(),
+                                            updated_at: chrono::Utc::now(),
+                                        };
+
+                                        info!("📋 Using default {:?} criteria: holders >= {}, mcap >= ${:.0}, progress >= {:.0}%",
+                                            current_strategy_type,
+                                            default_strategy.min_holders,
+                                            default_strategy.min_market_cap_usd.unwrap_or(0.0),
+                                            default_strategy.min_bonding_progress.unwrap_or(0.0));
+
+                                        // Fetch SOL price for USD->SOL conversion
+                                        let sol_price_usd = birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
+
+                                        // Run scanner with default strategy
+                                        match sc.scan_cycle(&default_strategy).await {
+                                            Ok(candidates) => {
+                                                if !candidates.is_empty() {
+                                                    info!("🎯 Scanner found {} candidates for {:?}", candidates.len(), current_strategy_type);
+                                                    for candidate in candidates {
+                                                        // Convert USD price to SOL price
+                                                        let price_sol = if sol_price_usd > 0.0 {
+                                                            candidate.price_usd / sol_price_usd
+                                                        } else {
+                                                            0.0
+                                                        };
+
+                                                        if config.dry_run_mode {
+                                                            if let Some(ref sim_mgr) = simulation_manager {
+                                                                if !sim_mgr.has_open_position(&candidate.token_address).await {
+                                                                    let entry_reason = format!("{:?}: MCap ${:.0}, Holders {}",
+                                                                        current_strategy_type, candidate.market_cap_usd, candidate.holders);
+                                                                    let _ = sim_mgr.simulate_buy(
+                                                                        &candidate.token_address, &candidate.symbol, &candidate.name,
+                                                                        price_sol, default_strategy.max_position_size_sol,
+                                                                        30, vec![entry_reason.clone()], entry_reason, default_strategy.id.clone(),
+                                                                    ).await;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => warn!("Scanner error: {:?}", e),
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // NewPairs mode - scanner not needed, WebSocket handles it
+                                }
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -705,6 +1243,13 @@ impl AutoTrader {
         let mut running_guard = self.running.write().await;
         *running_guard = false;
         drop(running_guard);
+
+        // Stop Pump.fun monitors if running
+        if self.config.dry_run_mode {
+            if let Err(e) = self.stop_pumpfun_discovery().await {
+                warn!("Error stopping Pump.fun discovery: {:?}", e);
+            }
+        }
 
         // Wait for the task to finish
         let mut task_handle_guard = self.task_handle.lock().await;
@@ -778,6 +1323,7 @@ impl AutoTrader {
             id: uuid::Uuid::new_v4().to_string(),
             name: "Default".to_string(),
             enabled: true,
+            strategy_type: crate::trading::strategy::StrategyType::NewPairs,
             max_concurrent_positions: 10,
             max_position_size_sol: amount_sol,
             total_budget_sol: amount_sol * 2.0,
@@ -795,6 +1341,12 @@ impl AutoTrader {
             require_can_sell: true,
             max_transfer_tax_percent: Some(5.0),
             max_concentration_percent: Some(80.0),
+            min_volume_usd: None,
+            min_market_cap_usd: None,
+            min_bonding_progress: None,
+            require_migrated: None,
+            min_buy_ratio_percent: 0.0,
+            min_unique_wallets_24h: None,
             slippage_bps: None,
             priority_fee_micro_lamports: None,
             created_at: chrono::Utc::now(),
@@ -837,6 +1389,250 @@ impl AutoTrader {
                 })
             }
         }
+    }
+
+    // =========================================================================
+    // PUMP.FUN REAL-TIME DISCOVERY (for DRY_RUN_MODE)
+    // =========================================================================
+
+    /// Initialize Pump.fun real-time token discovery.
+    /// This sets up the WebSocket monitor and graduation tracker.
+    /// Call this before start() when using DRY_RUN_MODE.
+    pub async fn init_pumpfun_discovery(&self) -> Result<()> {
+        if !self.config.dry_run_mode {
+            info!("Pump.fun discovery is only available in DRY_RUN_MODE");
+            return Ok(());
+        }
+
+        info!("🚀 Initializing Pump.fun real-time discovery...");
+
+        // Create channels for token discovery and graduation events
+        let (token_tx, token_rx) = mpsc::channel::<PumpfunToken>(100);
+        let (graduation_tx, graduation_rx) = mpsc::channel::<GraduationEvent>(50);
+
+        // Create channel for token flow: PumpfunMonitor -> GraduationMonitor
+        let (_token_for_grad_tx, token_for_grad_rx) = mpsc::channel::<PumpfunToken>(100);
+
+        // Create the Pump.fun monitor
+        let pumpfun_monitor = PumpfunMonitor::new(
+            &self.config.helius_api_key,
+            token_tx,
+        );
+
+        // Build RPC URL for graduation monitor
+        let rpc_url = format!("https://mainnet.helius-rpc.com/?api-key={}", self.config.helius_api_key);
+
+        // Create the graduation monitor
+        let graduation_monitor = GraduationMonitor::new(
+            &rpc_url,
+            token_for_grad_rx,
+            graduation_tx,
+        );
+
+        // Store the monitors and receivers
+        {
+            let mut monitor_guard = self.pumpfun_monitor.lock().await;
+            *monitor_guard = Some(pumpfun_monitor);
+        }
+        {
+            let mut grad_monitor_guard = self.graduation_monitor.lock().await;
+            *grad_monitor_guard = Some(graduation_monitor);
+        }
+        {
+            let mut token_rx_guard = self.pumpfun_token_rx.lock().await;
+            *token_rx_guard = Some(token_rx);
+        }
+        {
+            let mut grad_rx_guard = self.graduation_rx.lock().await;
+            *grad_rx_guard = Some(graduation_rx);
+        }
+
+        info!("✅ Pump.fun discovery initialized");
+        Ok(())
+    }
+
+    /// Start the Pump.fun monitors (call after init_pumpfun_discovery and start).
+    pub async fn start_pumpfun_discovery(&self) -> Result<()> {
+        if !self.config.dry_run_mode {
+            return Ok(());
+        }
+
+        info!("🎯 Starting Pump.fun real-time monitors...");
+
+        // Start Pump.fun monitor
+        {
+            let monitor_guard = self.pumpfun_monitor.lock().await;
+            if let Some(ref monitor) = *monitor_guard {
+                monitor.start().await?;
+                info!("✅ Pump.fun WebSocket monitor started");
+            }
+        }
+
+        // Start graduation monitor
+        {
+            let grad_monitor_guard = self.graduation_monitor.lock().await;
+            if let Some(ref monitor) = *grad_monitor_guard {
+                monitor.start().await?;
+                info!("✅ Graduation monitor started");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Stop the Pump.fun monitors.
+    pub async fn stop_pumpfun_discovery(&self) -> Result<()> {
+        info!("Stopping Pump.fun monitors...");
+
+        // Stop Pump.fun monitor
+        {
+            let monitor_guard = self.pumpfun_monitor.lock().await;
+            if let Some(ref monitor) = *monitor_guard {
+                monitor.stop().await?;
+            }
+        }
+
+        // Stop graduation monitor
+        {
+            let grad_monitor_guard = self.graduation_monitor.lock().await;
+            if let Some(ref monitor) = *grad_monitor_guard {
+                monitor.stop().await?;
+            }
+        }
+
+        info!("Pump.fun monitors stopped");
+        Ok(())
+    }
+
+    /// Process a discovered Pump.fun token.
+    /// Evaluates the token against enabled strategies and simulates buys if criteria are met.
+    /// Also adds tokens to the watchlist for later evaluation by Final Stretch/Migrated strategies.
+    ///
+    /// IMPORTANT: For NEW tokens, we use the data from CreateEvent directly!
+    /// - real_sol_reserves = 0 is EXPECTED (no one has bought yet)
+    /// - We use virtual_sol_reserves (30 SOL) for initial liquidity assessment
+    /// - We skip bonding curve fetch to avoid race condition
+    ///
+    /// `evaluate_for_trading`: If false, only adds to watchlist without evaluating for immediate trades.
+    /// This should be false when active_strategy_type is NOT NewPairs.
+    async fn process_pumpfun_token(
+        token: &PumpfunToken,
+        strategies: &[Strategy],
+        simulation_manager: &SimulationManager,
+        _rpc_client: &solana_client::nonblocking::rpc_client::RpcClient,
+        watchlist: Option<&crate::trading::watchlist::Watchlist>,
+        evaluate_for_trading: bool,
+    ) -> Result<()> {
+        info!("🔍 Processing Pump.fun token: {} ({})", token.symbol, token.mint);
+
+        // Add to watchlist for Final Stretch/Migrated strategy evaluation
+        // This happens regardless of active strategy type
+        if let Some(wl) = watchlist {
+            let watchlist_token = crate::trading::watchlist::WatchlistToken::from_create_event(
+                &token.mint,
+                &token.bonding_curve,
+                &token.name,
+                &token.symbol,
+                token.price_sol,
+                None, // creator not available from PumpfunToken
+            );
+            if let Err(e) = wl.add_token(watchlist_token).await {
+                warn!("Failed to add {} to watchlist: {:?}", token.symbol, e);
+            }
+        }
+
+        // If not in NewPairs mode, skip trade evaluation (scanner handles FinalStretch/Migrated)
+        if !evaluate_for_trading {
+            debug!("📋 Added {} to watchlist only (not in NewPairs mode)", token.symbol);
+            return Ok(());
+        }
+
+        // Skip if bonding curve is already complete
+        if token.is_graduated {
+            debug!("Token {} already graduated, skipping", token.symbol);
+            return Ok(());
+        }
+
+        // USE CreateEvent DATA DIRECTLY!
+        // The token.price_sol is already calculated from CreateEvent's virtual reserves
+        // This avoids the race condition where bonding curve account isn't ready yet
+        let price_sol = token.price_sol;
+
+        // For NEW tokens, progress is 0% (no one has bought yet) - THIS IS EXPECTED!
+        let progress = token.bonding_progress;
+
+        // For NEW tokens, real liquidity is 0 (no SOL deposited yet) - THIS IS EXPECTED!
+        // Use virtual liquidity (30 SOL) for initial assessment instead
+        const VIRTUAL_SOL_RESERVES: f64 = 30.0; // 30 SOL virtual liquidity at creation
+        let virtual_liquidity_sol = VIRTUAL_SOL_RESERVES;
+
+        info!("   Progress: {:.1}%, Price: {:.10} SOL, Virtual Liquidity: {:.2} SOL",
+            progress, price_sol, virtual_liquidity_sol);
+
+        // Calculate risk score for NEW tokens
+        // Don't penalize 0 real liquidity - it's EXPECTED for brand new tokens!
+        // Instead, use a simpler risk assessment based on token characteristics
+        let risk_score = calculate_new_token_risk_score(token);
+        info!("   Risk Score: {}/100 (new token scoring)", risk_score);
+
+        // Check against each enabled strategy
+        for strategy in strategies {
+            if !strategy.enabled {
+                continue;
+            }
+
+            // Check if token meets strategy criteria
+            // For NEW tokens, use virtual liquidity (30 SOL) for assessment
+            let meets_criteria =
+                risk_score <= strategy.max_risk_level &&
+                virtual_liquidity_sol >= strategy.min_liquidity_sol as f64;
+
+            if meets_criteria {
+                info!("✅ [CANDIDATE] {} meets criteria for strategy '{}' - Risk: {}/100, Virtual Liquidity: {:.2} SOL",
+                    token.symbol, strategy.name, risk_score, virtual_liquidity_sol);
+
+                // Check if we already have a simulated position
+                if !simulation_manager.has_open_position(&token.mint).await {
+                    // Simulate the buy
+                    let entry_reason = format!(
+                        "Pump.fun NEW token - Price: {:.10} SOL, Strategy: '{}'",
+                        price_sol, strategy.name
+                    );
+
+                    match simulation_manager.simulate_buy(
+                        &token.mint,
+                        &token.symbol,
+                        &token.name,
+                        price_sol,
+                        strategy.max_position_size_sol,
+                        risk_score,
+                        vec![
+                            format!("NEW TOKEN - Just created!"),
+                            format!("Virtual Liquidity: {:.2} SOL", virtual_liquidity_sol),
+                            format!("Price: {:.10} SOL", price_sol),
+                        ],
+                        entry_reason,
+                        strategy.id.clone(),
+                    ).await {
+                        Ok(_) => info!("🎯 [DRY RUN] Simulated buy for {} via strategy '{}'", token.symbol, strategy.name),
+                        Err(e) => warn!("🔍 [DRY RUN] Failed to simulate buy for {}: {:?}", token.symbol, e),
+                    }
+                } else {
+                    debug!("Already have simulated position for {}", token.symbol);
+                }
+            } else {
+                // Log why it was rejected
+                if risk_score > strategy.max_risk_level {
+                    info!("❌ {} rejected - Risk too high: {}/100 (max: {})",
+                        token.symbol, risk_score, strategy.max_risk_level);
+                } else if virtual_liquidity_sol < strategy.min_liquidity_sol as f64 {
+                    info!("❌ {} rejected - Virtual Liquidity too low: {:.2} SOL (min: {})",
+                        token.symbol, virtual_liquidity_sol, strategy.min_liquidity_sol);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Gets performance statistics for the trading bot
@@ -892,4 +1688,95 @@ pub struct PerformanceStats {
     pub win_rate: f64,
     pub avg_roi: f64,
     pub total_entry_value: f64,
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Calculate risk score for a NEWLY CREATED Pump.fun token.
+/// For new tokens, real_sol_reserves = 0 and progress = 0% is EXPECTED!
+/// We use different criteria than established tokens.
+/// Returns a score from 0-100 where higher = more risky.
+fn calculate_new_token_risk_score(token: &PumpfunToken) -> u32 {
+    let mut risk_score: f64 = 30.0; // Start at moderate-low risk for new tokens
+
+    // 1. Price sanity check - initial price should be ~0.000000028 SOL
+    let price = token.price_sol;
+    if price <= 0.0 {
+        risk_score += 40.0; // Invalid price
+    } else if price < 0.000000001 || price > 0.001 {
+        risk_score += 20.0; // Unusual starting price
+    }
+
+    // 2. Name/Symbol quality (basic heuristics)
+    if token.name.len() < 2 || token.symbol.len() < 2 {
+        risk_score += 15.0; // Very short name/symbol
+    }
+    if token.name.len() > 50 || token.symbol.len() > 15 {
+        risk_score += 10.0; // Unusually long
+    }
+
+    // 3. Check for suspicious patterns in name/symbol
+    let name_lower = token.name.to_lowercase();
+    let symbol_lower = token.symbol.to_lowercase();
+
+    // Common scam patterns
+    let scam_keywords = ["rug", "scam", "honeypot", "free", "airdrop", "giveaway"];
+    for keyword in scam_keywords {
+        if name_lower.contains(keyword) || symbol_lower.contains(keyword) {
+            risk_score += 30.0;
+            break;
+        }
+    }
+
+    // 4. Bonus: Tokens mimicking popular projects
+    let popular_tokens = ["bonk", "wif", "pepe", "doge", "shib", "trump", "melania"];
+    for popular in popular_tokens {
+        if symbol_lower == popular || name_lower == popular {
+            // Exact match to popular token name - suspicious
+            risk_score += 15.0;
+            break;
+        }
+    }
+
+    // Clamp to 0-100 range
+    risk_score.clamp(0.0, 100.0) as u32
+}
+
+/// Calculate risk score for a Pump.fun token based on bonding curve state.
+/// Returns a score from 0-100 where higher = more risky.
+#[allow(dead_code)]
+fn calculate_pumpfun_risk_score(progress_percent: f64, liquidity_sol: f64) -> u32 {
+    let mut risk_score: f64 = 50.0; // Start at moderate risk
+
+    // Progress-based risk: Very new tokens (< 10%) are highest risk
+    // Tokens close to graduation (> 80%) are lower risk
+    if progress_percent < 5.0 {
+        risk_score += 30.0; // Very early = very risky
+    } else if progress_percent < 10.0 {
+        risk_score += 20.0;
+    } else if progress_percent < 25.0 {
+        risk_score += 10.0;
+    } else if progress_percent > 80.0 {
+        risk_score -= 20.0; // Near graduation = lower risk
+    } else if progress_percent > 50.0 {
+        risk_score -= 10.0;
+    }
+
+    // Liquidity-based risk: More liquidity = lower risk
+    if liquidity_sol < 1.0 {
+        risk_score += 25.0; // Very low liquidity
+    } else if liquidity_sol < 5.0 {
+        risk_score += 15.0;
+    } else if liquidity_sol < 10.0 {
+        risk_score += 5.0;
+    } else if liquidity_sol > 50.0 {
+        risk_score -= 15.0; // High liquidity = lower risk
+    } else if liquidity_sol > 25.0 {
+        risk_score -= 10.0;
+    }
+
+    // Clamp to 0-100 range
+    risk_score.clamp(0.0, 100.0) as u32
 }

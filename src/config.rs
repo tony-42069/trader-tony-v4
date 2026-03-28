@@ -14,6 +14,7 @@ pub struct Config {
     pub helius_api_key: String,
     pub jupiter_api_key: Option<String>,
     pub birdeye_api_key: Option<String>,
+    pub moralis_api_key: Option<String>,
 
     // Web API Configuration
     pub api_host: Option<String>,
@@ -27,6 +28,7 @@ pub struct Config {
 
     // Trading Configuration
     pub demo_mode: bool,
+    pub dry_run_mode: bool,  // Scans real tokens, simulates trades without execution
     pub max_position_size_sol: f64,
     pub total_budget_sol: f64,
     pub default_stop_loss_percent: u32,
@@ -74,6 +76,7 @@ impl Config {
                 .context("HELIUS_API_KEY not set in environment")?,
             jupiter_api_key: env::var("JUPITER_API_KEY").ok(),
             birdeye_api_key: env::var("BIRDEYE_API_KEY").ok(),
+            moralis_api_key: env::var("MORALIS_API_KEY").ok(),
 
             // Web API Configuration
             api_host: env::var("API_HOST").ok(),
@@ -97,6 +100,9 @@ impl Config {
             demo_mode: env::var("DEMO_MODE")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(true), // Default to demo mode
+            dry_run_mode: env::var("DRY_RUN_MODE")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false), // Default to false
             max_position_size_sol: env::var("MAX_POSITION_SIZE_SOL")
                 .unwrap_or_else(|_| "0.01".to_string())
                 .parse()

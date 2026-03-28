@@ -2,12 +2,52 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+fn default_min_buy_ratio() -> f64 { 0.0 }
+
+/// Strategy type determines which discovery/evaluation method is used
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyType {
+    /// Sniper - catches tokens at creation (0% progress, milliseconds old)
+    /// Uses WebSocket CreateEvent monitoring
+    #[default]
+    NewPairs,
+    /// Bonding curve with traction - tokens still on pump.fun but with activity
+    /// Uses periodic scanner with Birdeye data
+    FinalStretch,
+    /// Graduated to PumpSwap/Raydium - tokens that completed bonding curve
+    /// Uses periodic scanner with Birdeye data
+    Migrated,
+}
+
+impl StrategyType {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            StrategyType::NewPairs => "New Pairs",
+            StrategyType::FinalStretch => "Final Stretch",
+            StrategyType::Migrated => "Migrated",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            StrategyType::NewPairs => "Sniper - catches tokens within milliseconds of creation",
+            StrategyType::FinalStretch => "Tokens on bonding curve with proven traction (20-80% progress)",
+            StrategyType::Migrated => "Tokens graduated to PumpSwap/Raydium with established liquidity",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Strategy {
     pub id: String,                          // Unique strategy ID (UUID)
     pub name: String,                        // User-defined strategy name
     pub enabled: bool,                       // Whether strategy is active for trading
-    
+
+    /// Strategy type determines discovery method (NewPairs, FinalStretch, Migrated)
+    #[serde(default)]
+    pub strategy_type: StrategyType,
+
     // Position Sizing & Budget
     pub max_concurrent_positions: u32,       // Max number of open positions for this strategy
     pub max_position_size_sol: f64,          // Max SOL value for a single position entry
@@ -32,6 +72,18 @@ pub struct Strategy {
     pub max_transfer_tax_percent: Option<f64>, // Maximum acceptable transfer tax (None means no check)
     pub max_concentration_percent: Option<f64>, // Maximum acceptable top holder concentration (None means no check)
 
+    // Final Stretch / Migrated Strategy Criteria (from Birdeye API)
+    pub min_volume_usd: Option<f64>,         // Minimum 24h volume in USD (e.g., 20000.0 for $20k)
+    pub min_market_cap_usd: Option<f64>,     // Minimum market cap in USD (e.g., 20000.0 for $20k)
+    pub min_bonding_progress: Option<f64>,   // Minimum bonding curve progress % (0-100, e.g., 20.0)
+    pub require_migrated: Option<bool>,      // TRUE = must be migrated, FALSE = must NOT be migrated, None = don't check
+
+    // Advanced Filters (for FinalStretch/Migrated)
+    #[serde(default = "default_min_buy_ratio")]
+    pub min_buy_ratio_percent: f64,          // Minimum buy/sell ratio (60.0 = 60% buys, reject if sells dominate)
+    #[serde(default)]
+    pub min_unique_wallets_24h: Option<u64>, // Minimum unique wallets trading in 24h (filters out wash trading)
+
     // Transaction Parameters (Optional overrides for config defaults)
     pub slippage_bps: Option<u32>,           // Slippage basis points for swaps (overrides config)
     pub priority_fee_micro_lamports: Option<u64>, // Priority fee for swaps (overrides config)
@@ -49,6 +101,7 @@ impl Strategy {
             id: Uuid::new_v4().to_string(),
             name: name.to_string(),
             enabled: true,
+            strategy_type: StrategyType::NewPairs, // Default to sniper
             max_concurrent_positions: 3,
             max_position_size_sol: 0.05, // Default smaller size
             total_budget_sol: 0.2,      // Default smaller budget
@@ -66,8 +119,96 @@ impl Strategy {
             require_can_sell: true,
             max_transfer_tax_percent: Some(5.0), // Reject if tax > 5%
             max_concentration_percent: Some(60.0), // Reject if concentration > 60%
+            // Final Stretch / Migrated criteria (None = not applicable for NewPairs)
+            min_volume_usd: None,
+            min_market_cap_usd: None,
+            min_bonding_progress: None,
+            require_migrated: None,
+            // Advanced filters (not used for NewPairs)
+            min_buy_ratio_percent: 0.0,
+            min_unique_wallets_24h: None,
             slippage_bps: None, // Use global default
             priority_fee_micro_lamports: None, // Use global default
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Create a Final Stretch strategy with recommended defaults
+    pub fn final_stretch(name: &str) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            enabled: true,
+            strategy_type: StrategyType::FinalStretch,
+            max_concurrent_positions: 5,
+            max_position_size_sol: 0.1,
+            total_budget_sol: 1.0,
+            stop_loss_percent: Some(20),
+            take_profit_percent: Some(50),
+            trailing_stop_percent: Some(10),
+            max_hold_time_minutes: 60,
+            min_liquidity_sol: 1,       // Virtual liquidity for bonding curve
+            max_risk_level: 70,
+            min_holders: 50,            // Minimum 50 holders
+            max_token_age_minutes: 60,  // 0-60 minutes old
+            require_lp_burned: false,   // N/A for bonding curve (still on pump.fun)
+            reject_if_mint_authority: true,
+            reject_if_freeze_authority: true,
+            require_can_sell: true,
+            max_transfer_tax_percent: Some(5.0),
+            max_concentration_percent: Some(40.0),  // Top holder < 40%
+            // Final Stretch specific criteria
+            min_volume_usd: Some(15_000.0),      // $15k minimum volume
+            min_market_cap_usd: Some(15_000.0),  // $15k minimum market cap (bonding caps at ~$32k)
+            min_bonding_progress: Some(20.0),    // 20% minimum progress
+            require_migrated: Some(false),       // Must NOT be migrated
+            // Advanced filters
+            min_buy_ratio_percent: 55.0,         // At least 55% buys (healthy demand)
+            min_unique_wallets_24h: Some(20),    // At least 20 unique wallets (organic activity)
+            slippage_bps: None,
+            priority_fee_micro_lamports: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Create a Migrated strategy with recommended defaults
+    pub fn migrated(name: &str) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            enabled: true,
+            strategy_type: StrategyType::Migrated,
+            max_concurrent_positions: 5,
+            max_position_size_sol: 0.1,
+            total_budget_sol: 1.0,
+            stop_loss_percent: Some(15),
+            take_profit_percent: Some(40),
+            trailing_stop_percent: Some(8),
+            max_hold_time_minutes: 1440, // 24 hours
+            min_liquidity_sol: 10,       // Real DEX liquidity
+            max_risk_level: 50,          // Lower risk tolerance for established tokens
+            min_holders: 75,             // Minimum 75 holders
+            max_token_age_minutes: 1440, // 0-24 hours old
+            require_lp_burned: false,
+            reject_if_mint_authority: true,
+            reject_if_freeze_authority: true,
+            require_can_sell: true,
+            max_transfer_tax_percent: Some(5.0),
+            max_concentration_percent: Some(50.0),
+            // Migrated specific criteria
+            min_volume_usd: Some(40_000.0),      // $40k minimum volume
+            min_market_cap_usd: Some(40_000.0),  // $40k minimum market cap
+            min_bonding_progress: None,          // N/A - already graduated
+            require_migrated: Some(true),        // Must BE migrated
+            // Advanced filters
+            min_buy_ratio_percent: 55.0,         // At least 55% buys
+            min_unique_wallets_24h: Some(30),    // At least 30 unique wallets (more established)
+            slippage_bps: None,
+            priority_fee_micro_lamports: None,
             created_at: now,
             updated_at: now,
         }
@@ -81,6 +222,7 @@ impl Strategy {
     // Create a basic strategy with more conservative parameters
     pub fn conservative(name: &str) -> Self {
         let mut strategy = Self::default(name);
+        strategy.strategy_type = StrategyType::NewPairs;
         strategy.max_position_size_sol = 0.01;
         strategy.total_budget_sol = 0.1;
         strategy.max_risk_level = 30;
@@ -91,10 +233,11 @@ impl Strategy {
         strategy.trailing_stop_percent = Some(3);
         strategy
     }
-    
+
     // Create a basic strategy with more aggressive parameters
     pub fn aggressive(name: &str) -> Self {
         let mut strategy = Self::default(name);
+        strategy.strategy_type = StrategyType::NewPairs;
         strategy.max_position_size_sol = 0.1;
         strategy.total_budget_sol = 0.5;
         strategy.max_risk_level = 75;

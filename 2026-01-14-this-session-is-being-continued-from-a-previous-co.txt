@@ -1,0 +1,33 @@
+
+ ▐▛███▜▌   Claude Code v2.1.6
+▝▜█████▛▘  Opus 4.5 · Claude Pro
+  ▘▘ ▝▝    D:\AI Projects\trader-tony-v4
+══════════════════ Conversation compacted · ctrl+o for history ═════════════════
+  ⎿  You've hit your limit · resets Jan 15, 1pm (America/New_York)
+     /upgrade to increase your usage limit.
+
+✻ Worked for 55s
+
+> Our limits are now refreshed. Please continue. 
+  ⎿  You've hit your limit · resets Jan 15, 1pm (America/New_York)
+     /upgrade to increase your usage limit.
+
+> /context 
+  ⎿   Context Usage
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛀   claude-opus-4-5-20251101 · 29k/200k tokens (14%)
+     ⛁ ⛁ ⛁ ⛁ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System prompt: 2.9k tokens (1.5%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System tools: 17.2k tokens (8.6%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Messages: 8.4k tokens (4.2%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛶ Free space: 126k (63.2%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛝ Autocompact buffer: 45.0k tokens (22.5%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ 
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛝ ⛝ ⛝ 
+     ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ 
+     ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ 
+
+
+> /usage 
+  ⎿  Status dialog dismissed
+
+
+

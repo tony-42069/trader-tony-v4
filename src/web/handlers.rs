@@ -309,6 +309,7 @@ pub async fn create_strategy(
         id: uuid::Uuid::new_v4().to_string(),
         name: req.name,
         enabled: true,
+        strategy_type: crate::trading::strategy::StrategyType::NewPairs,
         max_concurrent_positions: req.max_concurrent_positions.unwrap_or(5),
         max_position_size_sol: req.max_position_size_sol.unwrap_or(0.1),
         total_budget_sol: req.total_budget_sol.unwrap_or(1.0),
@@ -326,6 +327,12 @@ pub async fn create_strategy(
         require_can_sell: true,
         max_transfer_tax_percent: Some(5.0),
         max_concentration_percent: Some(50.0),
+        min_volume_usd: None,
+        min_market_cap_usd: None,
+        min_bonding_progress: None,
+        require_migrated: None,
+        min_buy_ratio_percent: 0.0,
+        min_unique_wallets_24h: None,
         slippage_bps: None,
         priority_fee_micro_lamports: None,
         created_at: now,
@@ -394,6 +401,7 @@ pub async fn update_strategy(
         id: existing.id.clone(),
         name: req.name.unwrap_or(existing.name),
         enabled: req.enabled.unwrap_or(existing.enabled),
+        strategy_type: existing.strategy_type,
         max_concurrent_positions: req.max_concurrent_positions.unwrap_or(existing.max_concurrent_positions),
         max_position_size_sol: req.max_position_size_sol.unwrap_or(existing.max_position_size_sol),
         total_budget_sol: req.total_budget_sol.unwrap_or(existing.total_budget_sol),
@@ -411,6 +419,12 @@ pub async fn update_strategy(
         require_can_sell: existing.require_can_sell,
         max_transfer_tax_percent: existing.max_transfer_tax_percent,
         max_concentration_percent: existing.max_concentration_percent,
+        min_volume_usd: existing.min_volume_usd,
+        min_market_cap_usd: existing.min_market_cap_usd,
+        min_bonding_progress: existing.min_bonding_progress,
+        require_migrated: existing.require_migrated,
+        min_buy_ratio_percent: existing.min_buy_ratio_percent,
+        min_unique_wallets_24h: existing.min_unique_wallets_24h,
         slippage_bps: existing.slippage_bps,
         priority_fee_micro_lamports: existing.priority_fee_micro_lamports,
         created_at: existing.created_at,
@@ -523,6 +537,7 @@ pub async fn get_autotrader_status(
     Ok(Json(AutoTraderStatus {
         running,
         demo_mode: state.config.demo_mode,
+        dry_run_mode: state.config.dry_run_mode,
         active_strategies,
         active_positions: positions.len(),
     }))
@@ -1069,4 +1084,271 @@ pub async fn build_copy_transaction(
             estimated_pnl: Some(pnl - fee),
         }))
     }
+}
+
+// ============================================================================
+// Simulation (Dry Run Mode)
+// ============================================================================
+
+/// Get all simulated positions
+pub async fn get_simulated_positions(
+    State(state): State<AppState>,
+) -> Result<Json<SimulatedPositionsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+
+    let positions = match &auto_trader.simulation_manager {
+        Some(sim_mgr) => sim_mgr.get_positions().await,
+        None => vec![],
+    };
+
+    let total = positions.len();
+    let is_dry_run_mode = state.config.dry_run_mode;
+
+    Ok(Json(SimulatedPositionsResponse {
+        positions,
+        total,
+        dry_run_mode: is_dry_run_mode,
+    }))
+}
+
+/// Get only open simulated positions
+pub async fn get_open_simulated_positions(
+    State(state): State<AppState>,
+) -> Result<Json<SimulatedPositionsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+
+    let positions = match &auto_trader.simulation_manager {
+        Some(sim_mgr) => sim_mgr.get_open_positions().await,
+        None => vec![],
+    };
+
+    let total = positions.len();
+    let is_dry_run_mode = state.config.dry_run_mode;
+
+    Ok(Json(SimulatedPositionsResponse {
+        positions,
+        total,
+        dry_run_mode: is_dry_run_mode,
+    }))
+}
+
+/// Get simulation statistics
+pub async fn get_simulation_stats(
+    State(state): State<AppState>,
+) -> Result<Json<SimulationStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+
+    let stats = match &auto_trader.simulation_manager {
+        Some(sim_mgr) => sim_mgr.get_stats().await,
+        None => crate::models::SimulationStats::default(),
+    };
+
+    let is_dry_run_mode = state.config.dry_run_mode;
+
+    Ok(Json(SimulationStatsResponse {
+        stats,
+        dry_run_mode: is_dry_run_mode,
+    }))
+}
+
+/// Clear all simulated positions
+pub async fn clear_simulation(
+    State(state): State<AppState>,
+) -> Result<Json<SuccessResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+
+    match &auto_trader.simulation_manager {
+        Some(sim_mgr) => {
+            match sim_mgr.clear().await {
+                Ok(_) => {
+                    info!("Cleared all simulated positions via API");
+                    Ok(Json(SuccessResponse {
+                        success: true,
+                        message: "All simulated positions cleared".to_string(),
+                    }))
+                }
+                Err(e) => {
+                    error!("Failed to clear simulated positions: {}", e);
+                    Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Failed to clear simulated positions".to_string(),
+                            details: Some(e.to_string()),
+                        }),
+                    ))
+                }
+            }
+        }
+        None => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Simulation not enabled".to_string(),
+                details: Some("DRY_RUN_MODE is not enabled".to_string()),
+            }),
+        )),
+    }
+}
+
+/// Manually close a simulated position
+pub async fn close_simulated_position(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SuccessResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+
+    match &auto_trader.simulation_manager {
+        Some(sim_mgr) => {
+            match sim_mgr.close_position(&id).await {
+                Ok(pos) => {
+                    info!(
+                        "Manually closed simulated position {} - P&L: {:.2}%",
+                        pos.token_symbol,
+                        pos.realized_pnl_percent.unwrap_or(0.0)
+                    );
+                    Ok(Json(SuccessResponse {
+                        success: true,
+                        message: format!(
+                            "Position {} closed with P&L: {:.2}%",
+                            pos.token_symbol,
+                            pos.realized_pnl_percent.unwrap_or(0.0)
+                        ),
+                    }))
+                }
+                Err(e) => {
+                    error!("Failed to close simulated position {}: {}", id, e);
+                    Err((
+                        StatusCode::NOT_FOUND,
+                        Json(ErrorResponse {
+                            error: "Failed to close position".to_string(),
+                            details: Some(e.to_string()),
+                        }),
+                    ))
+                }
+            }
+        }
+        None => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Simulation not enabled".to_string(),
+                details: Some("DRY_RUN_MODE is not enabled".to_string()),
+            }),
+        )),
+    }
+}
+
+// ============================================================================
+// Active Strategy Type (Multi-Strategy Support)
+// ============================================================================
+
+/// Get the currently active strategy type
+pub async fn get_active_strategy_type(
+    State(state): State<AppState>,
+) -> Result<Json<ActiveStrategyTypeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+    let strategy_type = auto_trader.get_active_strategy_type().await;
+
+    Ok(Json(ActiveStrategyTypeResponse {
+        strategy_type: format!("{:?}", strategy_type),
+        display_name: strategy_type.display_name().to_string(),
+        description: strategy_type.description().to_string(),
+    }))
+}
+
+/// Set the active strategy type
+pub async fn set_active_strategy_type(
+    State(state): State<AppState>,
+    Json(req): Json<SetActiveStrategyTypeRequest>,
+) -> Result<Json<ActiveStrategyTypeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use crate::trading::strategy::StrategyType;
+
+    // Parse the strategy type from string
+    let strategy_type = match req.strategy_type.to_lowercase().as_str() {
+        "newpairs" | "new_pairs" | "sniper" => StrategyType::NewPairs,
+        "finalstretch" | "final_stretch" | "bonding" => StrategyType::FinalStretch,
+        "migrated" | "graduated" => StrategyType::Migrated,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid strategy type".to_string(),
+                    details: Some(format!(
+                        "Valid types: NewPairs, FinalStretch, Migrated. Got: {}",
+                        req.strategy_type
+                    )),
+                }),
+            ));
+        }
+    };
+
+    let auto_trader = state.auto_trader.lock().await;
+
+    if let Err(e) = auto_trader.set_active_strategy_type(strategy_type.clone()).await {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to set strategy type".to_string(),
+                details: Some(e.to_string()),
+            }),
+        ));
+    }
+
+    info!("Active strategy type changed to: {:?}", strategy_type);
+
+    Ok(Json(ActiveStrategyTypeResponse {
+        strategy_type: format!("{:?}", strategy_type),
+        display_name: strategy_type.display_name().to_string(),
+        description: strategy_type.description().to_string(),
+    }))
+}
+
+// ============================================================================
+// Watchlist
+// ============================================================================
+
+/// Get all tokens in the watchlist
+pub async fn get_watchlist(
+    State(state): State<AppState>,
+) -> Result<Json<WatchlistResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+    let watchlist = auto_trader.get_watchlist();
+    let tokens = watchlist.get_all_tokens().await;
+
+    let token_responses: Vec<WatchlistTokenResponse> = tokens
+        .iter()
+        .map(|t| WatchlistTokenResponse {
+            mint: t.mint.clone(),
+            bonding_curve: t.bonding_curve.clone(),
+            name: t.name.clone(),
+            symbol: t.symbol.clone(),
+            created_at: t.created_at,
+            age_minutes: t.age_minutes(),
+            initial_price_sol: t.initial_price_sol,
+            last_known_progress: t.last_known_progress,
+            is_migrated: t.is_migrated,
+            traded: t.traded,
+        })
+        .collect();
+
+    let count = token_responses.len();
+
+    Ok(Json(WatchlistResponse {
+        tokens: token_responses,
+        count,
+    }))
+}
+
+/// Get watchlist statistics
+pub async fn get_watchlist_stats(
+    State(state): State<AppState>,
+) -> Result<Json<WatchlistStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let auto_trader = state.auto_trader.lock().await;
+    let stats = auto_trader.get_watchlist_stats().await;
+
+    Ok(Json(WatchlistStatsResponse {
+        total_tokens: stats.total_tokens,
+        active_tokens: stats.active_tokens,
+        traded_tokens: stats.traded_tokens,
+        migrated_tokens: stats.migrated_tokens,
+        max_capacity: stats.max_capacity,
+    }))
 }

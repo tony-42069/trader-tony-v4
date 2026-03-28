@@ -32,7 +32,7 @@
       "headers": [
         {
           "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
+          "value": "public, max-age=0, must-revalidate"
         }
       ]
     },
@@ -41,27 +41,28 @@
       "headers": [
         {
           "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
+          "value": "no-cache, no-store, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/index.html",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-cache, no-store, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-cache, no-store, must-revalidate"
         }
       ]
     }
   ],
-  "rewrites": [
-    {
-      "source": "/api/:path*",
-      "destination": "https://your-backend-url.railway.app/api/:path*"
-    },
-    {
-      "source": "/ws",
-      "destination": "wss://your-backend-url.railway.app/ws"
-    }
-  ],
-  "env": {
-    "API_BASE_URL": "@api_base_url"
-  },
-  "build": {
-    "env": {
-      "API_BASE_URL": "@api_base_url"
-    }
-  }
+  "rewrites": []
 }

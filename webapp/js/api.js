@@ -17,14 +17,16 @@ const API = {
         if (baseUrl) {
             this.baseUrl = baseUrl;
         } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-            // Development - connect to local Rust server
-            this.baseUrl = 'http://127.0.0.1:3030';
+            // Development - connect to local Rust server (default port 3000)
+            this.baseUrl = 'http://127.0.0.1:3000';
         } else {
-            // Production - use environment variable or same origin
-            this.baseUrl = window.API_BASE_URL || '';
+            // Production - use Railway backend directly (Vercel can't proxy reliably)
+            this.baseUrl = window.API_BASE_URL || 'https://trader-tony.up.railway.app';
         }
 
         console.log(`[API] Initialized with base URL: ${this.baseUrl}`);
+        console.log(`[API] Window API_BASE_URL: ${window.API_BASE_URL}`);
+        console.log(`[API] Hostname: ${window.location.hostname}`);
     },
 
     /**
@@ -317,6 +319,87 @@ const API = {
      */
     async buildCopyTransaction(params) {
         return this.post('/api/copy/build-tx', params);
+    },
+
+    // ==========================================
+    // Simulation (Dry Run Mode) Endpoints
+    // ==========================================
+
+    /**
+     * Get all simulated positions
+     */
+    async getSimulatedPositions() {
+        return this.get('/api/simulation/positions');
+    },
+
+    /**
+     * Get open simulated positions only
+     */
+    async getOpenSimulatedPositions() {
+        return this.get('/api/simulation/positions/open');
+    },
+
+    /**
+     * Get simulation statistics
+     */
+    async getSimulationStats() {
+        return this.get('/api/simulation/stats');
+    },
+
+    /**
+     * Clear all simulated positions
+     */
+    async clearSimulation() {
+        return this.post('/api/simulation/clear');
+    },
+
+    /**
+     * Manually close a simulated position
+     * @param {string} positionId - Simulated position ID
+     */
+    async closeSimulatedPosition(positionId) {
+        return this.post(`/api/simulation/close/${positionId}`);
+    },
+
+    // ==========================================
+    // Active Strategy Type (Multi-Strategy)
+    // ==========================================
+
+    /**
+     * Get the currently active strategy type
+     * @returns {Promise<{strategy_type: string, display_name: string, description: string}>}
+     */
+    async getActiveStrategyType() {
+        return this.get('/api/strategy/active');
+    },
+
+    /**
+     * Set the active strategy type
+     * @param {string} strategyType - Strategy type: NewPairs, FinalStretch, or Migrated
+     * @returns {Promise<{strategy_type: string, display_name: string, description: string}>}
+     */
+    async setActiveStrategyType(strategyType) {
+        return this.post('/api/strategy/active', { strategy_type: strategyType });
+    },
+
+    // ==========================================
+    // Watchlist Endpoints
+    // ==========================================
+
+    /**
+     * Get all tokens in the watchlist
+     * @returns {Promise<{tokens: Array, count: number}>}
+     */
+    async getWatchlist() {
+        return this.get('/api/watchlist');
+    },
+
+    /**
+     * Get watchlist statistics
+     * @returns {Promise<{total_tokens: number, active_tokens: number, traded_tokens: number, migrated_tokens: number, max_capacity: number}>}
+     */
+    async getWatchlistStats() {
+        return this.get('/api/watchlist/stats');
     },
 
     // ==========================================
@@ -650,6 +733,86 @@ const API = {
                 estimated_output: 4273504,
                 estimated_fee: null,
                 estimated_pnl: null,
+            };
+        }
+
+        // Simulation positions
+        if (endpoint === '/api/simulation/positions' || endpoint === '/api/simulation/positions/open') {
+            return {
+                positions: [
+                    {
+                        id: 'sim_001',
+                        token_address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+                        token_symbol: 'BONK',
+                        token_name: 'Bonk',
+                        entry_price_sol: 0.0000234,
+                        entry_amount_sol: 0.5,
+                        token_amount: 21367521,
+                        entry_time: new Date(Date.now() - 3600000).toISOString(),
+                        current_price_sol: 0.0000312,
+                        current_value_sol: 0.667,
+                        unrealized_pnl_sol: 0.167,
+                        unrealized_pnl_percent: 33.4,
+                        risk_score: 35,
+                        risk_details: ['Good liquidity', 'LP burned'],
+                        selection_reason: "Passed 'Aggressive' strategy criteria",
+                        strategy_id: 'strat_001',
+                        status: 'Open',
+                        highest_price_sol: 0.0000320,
+                    },
+                    {
+                        id: 'sim_002',
+                        token_address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
+                        token_symbol: 'WIF',
+                        token_name: 'dogwifhat',
+                        entry_price_sol: 0.0145,
+                        entry_amount_sol: 1.0,
+                        token_amount: 68.97,
+                        entry_time: new Date(Date.now() - 7200000).toISOString(),
+                        current_price_sol: 0.0132,
+                        current_value_sol: 0.91,
+                        unrealized_pnl_sol: -0.09,
+                        unrealized_pnl_percent: -9.0,
+                        risk_score: 42,
+                        risk_details: ['Moderate liquidity', 'Active development'],
+                        selection_reason: "Passed 'Conservative' strategy criteria",
+                        strategy_id: 'strat_002',
+                        status: 'Open',
+                        highest_price_sol: 0.0148,
+                    },
+                ],
+                total: 2,
+                dry_run_mode: true,
+            };
+        }
+
+        // Simulation stats
+        if (endpoint === '/api/simulation/stats') {
+            return {
+                stats: {
+                    total_simulated_trades: 15,
+                    open_positions: 2,
+                    closed_positions: 13,
+                    winning_trades: 9,
+                    losing_trades: 4,
+                    total_realized_pnl_sol: 2.45,
+                    total_unrealized_pnl_sol: 0.077,
+                    win_rate: 69.23,
+                    would_have_spent_sol: 8.5,
+                    would_have_returned_sol: 10.95,
+                    average_pnl_percent: 18.7,
+                    best_trade_pnl_percent: 85.5,
+                    worst_trade_pnl_percent: -22.3,
+                },
+                dry_run_mode: true,
+            };
+        }
+
+        // Simulation clear
+        if (endpoint === '/api/simulation/clear') {
+            return {
+                success: true,
+                message: 'All simulated positions cleared',
             };
         }
 

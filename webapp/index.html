@@ -3,298 +3,578 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TraderTony V4 - Autonomous Solana Trading Bot</title>
-    <link rel="stylesheet" href="css/styles.css">
+    <meta name="description" content="TraderTony V4 - Elite autonomous trading bot for Solana memecoins with AI-powered risk analysis">
+    <meta name="theme-color" content="#030304">
+    
+    <title>TraderTony V4 — Elite Autonomous Solana Trading</title>
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="assets/favicon.png">
+    
+    <!-- Premium Fonts - Optimized Loading -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500;1,600&family=DM+Sans:ital,opsz,wght@0,9..40,300..700;1,9..40,300..700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+    
+    <!-- Styles -->
+    <link rel="stylesheet" href="css/terminal.css">
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
-    <!-- Header -->
-    <header class="header">
+    <!-- Atmospheric Background Effects -->
+    <div class="ambient-glow ambient-glow-1" aria-hidden="true"></div>
+    <div class="ambient-glow ambient-glow-2" aria-hidden="true"></div>
+    <div class="grain-overlay" aria-hidden="true"></div>
+
+    <!-- ========================================
+         Header - Navigation Bar
+         ======================================== -->
+    <header class="header" role="banner">
         <div class="header-left">
-            <div class="logo">
-                <span class="logo-icon">&#9883;</span>
+            <a href="/" class="logo" aria-label="TraderTony V4 Home">
+                <div class="logo-mark">
+                    <img src="assets/logo.png" alt="" class="logo-img" loading="eager">
+                </div>
                 <span class="logo-text">TraderTony</span>
-                <span class="version">V4</span>
-            </div>
-            <div class="status-indicator" id="botStatus">
-                <span class="status-dot"></span>
+                <span class="version-badge">V4</span>
+            </a>
+        </div>
+        
+        <nav class="header-nav" role="navigation" aria-label="Main navigation">
+            <a href="#performance" class="nav-link">Performance</a>
+            <a href="#controls" class="nav-link">Controls</a>
+            <a href="#positions" class="nav-link">Positions</a>
+            <a href="https://github.com/tony-42069/trader-tony-v4" target="_blank" rel="noopener noreferrer" class="nav-link nav-link-external">
+                GitHub
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <path d="M3.5 2H10V8.5M10 2L2 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+            </a>
+        </nav>
+
+        <div class="header-right">
+            <div class="status-pill" id="botStatus" role="status" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span>
                 <span class="status-text">Connecting...</span>
             </div>
-        </div>
-        <div class="header-right">
-            <div class="demo-badge" id="demoBadge" style="display: none;">
-                DEMO MODE
-            </div>
-            <button class="btn btn-secondary" id="refreshBtn" title="Refresh Data">
-                <span class="btn-icon">&#8635;</span>
-            </button>
-            <button class="btn btn-primary" id="connectWalletBtn">
-                <span class="btn-icon">&#128279;</span>
-                Connect Wallet
+            <div class="demo-badge" id="demoBadge" style="display: none;" aria-label="Demo Mode Active">DEMO</div>
+            <button class="btn btn-outline" id="connectWalletBtn" type="button">
+                <span>Connect Wallet</span>
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M6 3L11 8L6 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
             </button>
         </div>
     </header>
 
-    <!-- Main Content -->
-    <main class="main-content">
-        <!-- Stats Cards -->
-        <section class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-label">Total Trades</div>
-                <div class="stat-value" id="totalTrades">-</div>
-                <div class="stat-subtitle">All time</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Win Rate</div>
-                <div class="stat-value" id="winRate">-</div>
-                <div class="stat-progress">
-                    <div class="progress-bar" id="winRateBar" style="width: 0%"></div>
+    <!-- ========================================
+         Hero Section - Main Value Proposition
+         ======================================== -->
+    <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-content">
+            <p class="hero-eyebrow">AUTONOMOUS TRADING ENGINE</p>
+            <h1 class="hero-title" id="hero-title">
+                <span class="hero-line-1">The Intelligence</span>
+                <span class="hero-line-2">Behind Your</span>
+                <span class="hero-line-3"><em>Solana Trades</em></span>
+            </h1>
+            <p class="hero-description">
+                AI-powered memecoin discovery with advanced risk analysis and automated position management.
+                Cross-chain reputation data from <span class="highlight">Solana</span>, powered by real-time market intelligence.
+            </p>
+        </div>
+    </section>
+
+    <!-- ========================================
+         Stats Section - Key Metrics
+         ======================================== -->
+    <section class="stats-section" id="performance" aria-labelledby="stats-heading">
+        <h2 id="stats-heading" class="hidden">Performance Statistics</h2>
+        <div class="stats-grid">
+            <article class="stat-item" style="--delay: 0">
+                <span class="stat-number" id="totalTrades">0</span>
+                <span class="stat-label">TOTAL TRADES</span>
+                <span class="stat-sublabel">All time volume</span>
+            </article>
+            <article class="stat-item" style="--delay: 1">
+                <span class="stat-number" id="totalPnl">$0</span>
+                <span class="stat-label">TOTAL P&L</span>
+                <span class="stat-sublabel" id="pnlSubtitle">SOL equivalent</span>
+            </article>
+            <article class="stat-item" style="--delay: 2">
+                <span class="stat-number" id="winRate">0%</span>
+                <span class="stat-label">WIN RATE</span>
+                <span class="stat-sublabel">Success ratio</span>
+            </article>
+            <article class="stat-item" style="--delay: 3">
+                <span class="stat-number" id="avgRoi">0%</span>
+                <span class="stat-label">AVG ROI</span>
+                <span class="stat-sublabel">Per trade</span>
+            </article>
+        </div>
+    </section>
+
+    <!-- ========================================
+         Main Content Area
+         ======================================== -->
+    <main class="main-content" role="main">
+        
+        <!-- Performance Chart Section -->
+        <section class="section-block chart-section" aria-labelledby="chart-heading">
+            <div class="section-header">
+                <div class="section-header-left">
+                    <span class="section-tag">ANALYTICS</span>
+                    <h2 class="section-title" id="chart-heading">Performance <em>Overview</em></h2>
+                </div>
+                <div class="chart-legend" aria-label="Chart legend">
+                    <div class="legend-item">
+                        <span class="legend-dot legend-profit" aria-hidden="true"></span>
+                        <span>Profit</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-dot legend-loss" aria-hidden="true"></span>
+                        <span>Loss</span>
+                    </div>
                 </div>
             </div>
-            <div class="stat-card">
-                <div class="stat-label">Total PnL</div>
-                <div class="stat-value" id="totalPnl">-</div>
-                <div class="stat-subtitle" id="pnlSubtitle">SOL</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Avg ROI</div>
-                <div class="stat-value" id="avgRoi">-</div>
-                <div class="stat-subtitle">Per trade</div>
+            <div class="chart-wrapper">
+                <canvas id="pnlChart" aria-label="Profit and Loss Chart"></canvas>
             </div>
         </section>
 
-        <!-- Two Column Layout -->
-        <div class="two-column">
-            <!-- Left Column -->
-            <div class="column">
-                <!-- Bot Wallet Card -->
-                <section class="card">
+        <!-- Two Column Grid - Controls & Data -->
+        <div class="content-grid" id="controls">
+            
+            <!-- Left Column - Controls -->
+            <div class="content-column">
+                
+                <!-- Wallet Card -->
+                <article class="glass-card" aria-labelledby="wallet-heading">
                     <div class="card-header">
-                        <h2 class="card-title">Bot Wallet</h2>
-                        <span class="badge badge-info" id="networkBadge">Mainnet</span>
+                        <h3 class="card-title" id="wallet-heading">Bot Wallet</h3>
+                        <span class="badge badge-blue" id="networkBadge">Mainnet</span>
                     </div>
-                    <div class="card-body">
-                        <div class="wallet-info">
-                            <div class="wallet-address-row">
-                                <span class="label">Address</span>
-                                <div class="wallet-address">
-                                    <code id="walletAddress">Loading...</code>
-                                    <button class="btn-icon-only" id="copyAddressBtn" title="Copy Address">
-                                        &#128203;
-                                    </button>
-                                    <a class="btn-icon-only" id="solscanLink" href="#" target="_blank" title="View on Solscan">
-                                        &#8599;
-                                    </a>
-                                </div>
+                    <div class="card-content">
+                        <div class="wallet-row">
+                            <span class="wallet-label">Address</span>
+                            <div class="wallet-address-group">
+                                <code class="wallet-address" id="walletAddress">Loading...</code>
+                                <button class="icon-btn" id="copyAddressBtn" title="Copy address" type="button" aria-label="Copy wallet address">
+                                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                        <rect x="5" y="5" width="9" height="9" rx="2" stroke="currentColor" stroke-width="1.5"/>
+                                        <path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2H3.5A1.5 1.5 0 0 0 2 3.5V9.5A1.5 1.5 0 0 0 3.5 11H5" stroke="currentColor" stroke-width="1.5"/>
+                                    </svg>
+                                </button>
+                                <a class="icon-btn" id="solscanLink" href="#" target="_blank" rel="noopener noreferrer" title="View on Solscan" aria-label="View wallet on Solscan">
+                                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                        <path d="M6 2H3.5A1.5 1.5 0 0 0 2 3.5V12.5A1.5 1.5 0 0 0 3.5 14H12.5A1.5 1.5 0 0 0 14 12.5V10M10 2H14V6M14 2L7 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                                    </svg>
+                                </a>
                             </div>
-                            <div class="wallet-balance-row">
-                                <span class="label">Balance</span>
-                                <div class="wallet-balance">
-                                    <span class="balance-value" id="walletBalance">-</span>
-                                    <span class="balance-unit">SOL</span>
-                                </div>
+                        </div>
+                        <div class="wallet-row">
+                            <span class="wallet-label">Balance</span>
+                            <div class="wallet-balance">
+                                <span class="balance-amount" id="walletBalance">—</span>
+                                <span class="balance-unit">SOL</span>
                             </div>
                         </div>
                     </div>
-                </section>
+                </article>
 
                 <!-- AutoTrader Controls -->
-                <section class="card">
+                <article class="glass-card" aria-labelledby="autotrader-heading">
                     <div class="card-header">
-                        <h2 class="card-title">AutoTrader Controls</h2>
-                        <div class="autotrader-status" id="autotraderStatus">
-                            <span class="status-dot"></span>
-                            <span>Stopped</span>
+                        <h3 class="card-title" id="autotrader-heading">AutoTrader</h3>
+                        <div class="autotrader-status" id="autotraderStatus" role="status">
+                            <span class="status-dot" aria-hidden="true"></span>
+                            <span>Inactive</span>
                         </div>
                     </div>
-                    <div class="card-body">
-                        <div class="control-row">
-                            <div class="control-info">
-                                <span class="control-label">Active Strategies</span>
-                                <span class="control-value" id="activeStrategies">0</span>
+                    <div class="card-content">
+                        <!-- Strategy Selector -->
+                        <div class="form-group">
+                            <label class="form-label" for="strategyTypeSelect">Strategy Mode</label>
+                            <select class="select-input" id="strategyTypeSelect">
+                                <option value="NewPairs">New Pairs (Sniper)</option>
+                                <option value="FinalStretch">Final Stretch (Bonding Curve)</option>
+                                <option value="Migrated">Migrated (Graduated)</option>
+                            </select>
+                            <p class="form-hint" id="strategyDescription">Catches tokens within milliseconds of creation</p>
+                        </div>
+
+                        <!-- Metrics Grid -->
+                        <div class="metrics-grid" role="group" aria-label="Trading metrics">
+                            <div class="metric-box">
+                                <span class="metric-value" id="activeStrategies">0</span>
+                                <span class="metric-label">Strategies</span>
                             </div>
-                            <div class="control-info">
-                                <span class="control-label">Open Positions</span>
-                                <span class="control-value" id="openPositions">0</span>
+                            <div class="metric-box">
+                                <span class="metric-value" id="openPositions">0</span>
+                                <span class="metric-label">Positions</span>
+                            </div>
+                            <div class="metric-box">
+                                <span class="metric-value" id="watchlistCount">0</span>
+                                <span class="metric-label">Watchlist</span>
                             </div>
                         </div>
-                        <div class="control-buttons">
-                            <button class="btn btn-success" id="startTradingBtn">
-                                <span class="btn-icon">&#9658;</span>
+
+                        <!-- Action Buttons -->
+                        <div class="button-group">
+                            <button class="btn btn-success" id="startTradingBtn" type="button">
+                                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                    <path d="M4 2.5V13.5L13 8L4 2.5Z" fill="currentColor"/>
+                                </svg>
                                 Start Trading
                             </button>
-                            <button class="btn btn-danger" id="stopTradingBtn" disabled>
-                                <span class="btn-icon">&#9632;</span>
-                                Stop Trading
+                            <button class="btn btn-danger" id="stopTradingBtn" type="button" disabled>
+                                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                    <rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/>
+                                </svg>
+                                Stop
                             </button>
                         </div>
                     </div>
-                </section>
+                </article>
 
                 <!-- Token Analysis -->
-                <section class="card">
+                <article class="glass-card" aria-labelledby="analysis-heading">
                     <div class="card-header">
-                        <h2 class="card-title">Token Analysis</h2>
+                        <h3 class="card-title" id="analysis-heading">Token Analysis</h3>
                     </div>
-                    <div class="card-body">
-                        <div class="analyze-form">
-                            <input type="text" class="input" id="analyzeTokenInput" placeholder="Enter token address...">
-                            <button class="btn btn-primary" id="analyzeTokenBtn">Analyze</button>
-                        </div>
-                        <div class="analysis-result" id="analysisResult" style="display: none;">
+                    <div class="card-content">
+                        <form class="search-form" id="analyzeForm" onsubmit="return false;">
+                            <div class="search-input-wrapper">
+                                <svg class="search-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                                    <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/>
+                                    <path d="M12.5 12.5L16 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                                </svg>
+                                <input type="text" 
+                                       class="search-input" 
+                                       id="analyzeTokenInput" 
+                                       placeholder="Enter token address..."
+                                       aria-label="Token address for analysis"
+                                       autocomplete="off"
+                                       spellcheck="false">
+                            </div>
+                            <button class="btn btn-primary" id="analyzeTokenBtn" type="submit">
+                                Analyze
+                                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                                    <path d="M5 2L10 7L5 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                            </button>
+                        </form>
+
+                        <!-- Analysis Results (hidden by default) -->
+                        <div class="analysis-results" id="analysisResult" style="display: none;" role="region" aria-label="Token analysis results">
                             <div class="analysis-header">
-                                <span class="analysis-token" id="analysisToken">-</span>
-                                <span class="risk-badge" id="riskBadge">-</span>
+                                <code class="analysis-token" id="analysisToken">—</code>
+                                <span class="risk-badge" id="riskBadge">—</span>
                             </div>
-                            <div class="analysis-grid">
-                                <div class="analysis-item">
-                                    <span class="analysis-label">Risk Level</span>
-                                    <span class="analysis-value" id="analysisRiskLevel">-</span>
+                            <div class="analysis-metrics">
+                                <div class="analysis-metric">
+                                    <span class="analysis-metric-label">Risk Level</span>
+                                    <span class="analysis-metric-value" id="analysisRiskLevel">—</span>
                                 </div>
-                                <div class="analysis-item">
-                                    <span class="analysis-label">Liquidity</span>
-                                    <span class="analysis-value" id="analysisLiquidity">-</span>
+                                <div class="analysis-metric">
+                                    <span class="analysis-metric-label">Liquidity</span>
+                                    <span class="analysis-metric-value" id="analysisLiquidity">—</span>
                                 </div>
-                                <div class="analysis-item">
-                                    <span class="analysis-label">Holders</span>
-                                    <span class="analysis-value" id="analysisHolders">-</span>
+                                <div class="analysis-metric">
+                                    <span class="analysis-metric-label">Holders</span>
+                                    <span class="analysis-metric-value" id="analysisHolders">—</span>
                                 </div>
-                                <div class="analysis-item">
-                                    <span class="analysis-label">Can Sell</span>
-                                    <span class="analysis-value" id="analysisCanSell">-</span>
+                                <div class="analysis-metric">
+                                    <span class="analysis-metric-label">Can Sell</span>
+                                    <span class="analysis-metric-value" id="analysisCanSell">—</span>
                                 </div>
                             </div>
-                            <div class="analysis-recommendation" id="analysisRecommendation">-</div>
+                            <div class="analysis-recommendation" id="analysisRecommendation">—</div>
                         </div>
                     </div>
-                </section>
+                </article>
             </div>
 
-            <!-- Right Column -->
-            <div class="column column-wide">
+            <!-- Right Column - Data Tables -->
+            <div class="content-column content-column-wide" id="positions">
+                
                 <!-- Active Positions -->
-                <section class="card">
+                <article class="glass-card" aria-labelledby="positions-heading">
                     <div class="card-header">
-                        <h2 class="card-title">Active Positions</h2>
-                        <span class="badge" id="positionCount">0</span>
+                        <h3 class="card-title" id="positions-heading">Active Positions</h3>
+                        <span class="count-badge" id="positionCount" aria-label="Number of active positions">0</span>
                     </div>
-                    <div class="card-body">
-                        <div class="table-container">
-                            <table class="table" id="positionsTable">
+                    <div class="card-content">
+                        <div class="table-wrapper">
+                            <table class="data-table" aria-label="Active trading positions">
                                 <thead>
                                     <tr>
-                                        <th>Token</th>
-                                        <th>Entry</th>
-                                        <th>Current</th>
-                                        <th>PnL</th>
-                                        <th>Time</th>
-                                        <th>Status</th>
+                                        <th scope="col">Token</th>
+                                        <th scope="col">Entry</th>
+                                        <th scope="col">Current</th>
+                                        <th scope="col">P&L</th>
+                                        <th scope="col">Time</th>
+                                        <th scope="col">Status</th>
                                     </tr>
                                 </thead>
                                 <tbody id="positionsBody">
                                     <tr class="empty-row">
-                                        <td colspan="6">No active positions</td>
+                                        <td colspan="6">
+                                            <div class="empty-state">
+                                                <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                                                    <circle cx="16" cy="16" r="12" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 4"/>
+                                                    <path d="M16 11V17M16 21H16.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                                                </svg>
+                                                <span>No active positions</span>
+                                            </div>
+                                        </td>
                                     </tr>
                                 </tbody>
                             </table>
                         </div>
                     </div>
-                </section>
+                </article>
 
-                <!-- Trade History -->
-                <section class="card">
+                <!-- Recent Trades -->
+                <article class="glass-card" aria-labelledby="trades-heading">
                     <div class="card-header">
-                        <h2 class="card-title">Recent Trades</h2>
-                        <span class="badge" id="tradeCount">0</span>
+                        <h3 class="card-title" id="trades-heading">Recent Trades</h3>
+                        <span class="count-badge" id="tradeCount" aria-label="Number of recent trades">0</span>
                     </div>
-                    <div class="card-body">
-                        <div class="table-container">
-                            <table class="table" id="tradesTable">
+                    <div class="card-content">
+                        <div class="table-wrapper">
+                            <table class="data-table" aria-label="Recent trading activity">
                                 <thead>
                                     <tr>
-                                        <th>Token</th>
-                                        <th>Action</th>
-                                        <th>Amount</th>
-                                        <th>PnL</th>
-                                        <th>Time</th>
+                                        <th scope="col">Token</th>
+                                        <th scope="col">Action</th>
+                                        <th scope="col">Amount</th>
+                                        <th scope="col">P&L</th>
+                                        <th scope="col">Time</th>
                                     </tr>
                                 </thead>
                                 <tbody id="tradesBody">
                                     <tr class="empty-row">
-                                        <td colspan="5">No trades yet</td>
+                                        <td colspan="5">
+                                            <div class="empty-state">
+                                                <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                                                    <rect x="6" y="8" width="20" height="16" rx="2" stroke="currentColor" stroke-width="1.5"/>
+                                                    <path d="M6 12H26" stroke="currentColor" stroke-width="1.5"/>
+                                                    <circle cx="10" cy="18" r="1.5" fill="currentColor"/>
+                                                </svg>
+                                                <span>No trades yet</span>
+                                            </div>
+                                        </td>
                                     </tr>
                                 </tbody>
                             </table>
                         </div>
                     </div>
-                </section>
+                </article>
             </div>
         </div>
 
-        <!-- Copy Trade Section -->
-        <section class="card copy-trade-section">
-            <div class="card-header">
-                <h2 class="card-title">Copy Trading</h2>
-                <span class="badge badge-warning">Coming Soon</span>
+        <!-- Simulation Section (Dry Run Mode) -->
+        <section class="section-block simulation-section" id="simulationSection" style="display: none;" aria-labelledby="simulation-heading">
+            <div class="section-header">
+                <div class="section-header-left">
+                    <span class="section-tag section-tag-purple">DRY RUN MODE</span>
+                    <h2 class="section-title" id="simulation-heading">Simulation <em>Results</em></h2>
+                </div>
+                <button class="btn btn-ghost btn-sm" id="clearSimulationBtn" type="button">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                        <path d="M2 4H12M5 4V3A1 1 0 0 1 6 2H8A1 1 0 0 1 9 3V4M11 4V11A1 1 0 0 1 10 12H4A1 1 0 0 1 3 11V4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    Clear All
+                </button>
             </div>
-            <div class="card-body">
-                <div class="copy-trade-info">
-                    <div class="copy-trade-feature">
-                        <span class="feature-icon">&#128176;</span>
-                        <div class="feature-content">
-                            <h3>Auto-Copy Trades</h3>
-                            <p>Automatically mirror the bot's trades in your own wallet</p>
+
+            <!-- Simulation Stats -->
+            <div class="sim-stats-grid" role="group" aria-label="Simulation statistics">
+                <div class="sim-stat">
+                    <span class="sim-stat-value" id="simTotalTrades">0</span>
+                    <span class="sim-stat-label">Total Trades</span>
+                </div>
+                <div class="sim-stat">
+                    <span class="sim-stat-value" id="simWinRate">0%</span>
+                    <span class="sim-stat-label">Win Rate</span>
+                </div>
+                <div class="sim-stat">
+                    <span class="sim-stat-value positive" id="simWinningTrades">0</span>
+                    <span class="sim-stat-label">Wins</span>
+                </div>
+                <div class="sim-stat">
+                    <span class="sim-stat-value negative" id="simLosingTrades">0</span>
+                    <span class="sim-stat-label">Losses</span>
+                </div>
+                <div class="sim-stat">
+                    <span class="sim-stat-value" id="simRealizedPnl">0 SOL</span>
+                    <span class="sim-stat-label">Realized P&L</span>
+                </div>
+                <div class="sim-stat">
+                    <span class="sim-stat-value" id="simUnrealizedPnl">0 SOL</span>
+                    <span class="sim-stat-label">Unrealized P&L</span>
+                </div>
+                <div class="sim-stat">
+                    <span class="sim-stat-value" id="simBestTrade">0%</span>
+                    <span class="sim-stat-label">Best Trade</span>
+                </div>
+                <div class="sim-stat">
+                    <span class="sim-stat-value" id="simWorstTrade">0%</span>
+                    <span class="sim-stat-label">Worst Trade</span>
+                </div>
+                <div class="sim-stat">
+                    <span class="sim-stat-value" id="simWouldHaveSpent">0 SOL</span>
+                    <span class="sim-stat-label">Would Have Spent</span>
+                </div>
+                <div class="sim-stat">
+                    <span class="sim-stat-value" id="simWouldHaveReturned">0 SOL</span>
+                    <span class="sim-stat-label">Would Have Returned</span>
+                </div>
+            </div>
+
+            <!-- Simulated Positions Table -->
+            <div class="table-wrapper">
+                <table class="data-table" aria-label="Simulated positions">
+                    <thead>
+                        <tr>
+                            <th scope="col">Token</th>
+                            <th scope="col">Entry</th>
+                            <th scope="col">Current</th>
+                            <th scope="col">P&L</th>
+                            <th scope="col">Risk</th>
+                            <th scope="col">Reason</th>
+                            <th scope="col">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="simulatedPositionsBody">
+                        <tr class="empty-row">
+                            <td colspan="7">
+                                <div class="empty-state">
+                                    <span>No simulated positions yet</span>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Methodology Section - How It Works -->
+        <section class="section-block methodology-section" aria-labelledby="methodology-heading">
+            <div class="section-header section-header-centered">
+                <span class="section-tag">METHODOLOGY</span>
+                <h2 class="section-title" id="methodology-heading">How we calculate <em>trust scores</em></h2>
+            </div>
+
+            <div class="method-cards">
+                <article class="method-card" style="--delay: 0">
+                    <span class="method-number" aria-hidden="true">01</span>
+                    <span class="method-badge">RISK-ANALYSIS</span>
+                    <h4 class="method-title">Contract Verification</h4>
+                    <p class="method-description">We analyze smart contract code, checking for honeypot patterns, mint authority, and freeze capabilities.</p>
+                </article>
+
+                <article class="method-card" style="--delay: 1">
+                    <span class="method-number" aria-hidden="true">02</span>
+                    <span class="method-badge">LIQUIDITY</span>
+                    <h4 class="method-title">Liquidity Analysis</h4>
+                    <p class="method-description">Real-time monitoring of bonding curve reserves, LP token locks, and pool depth metrics.</p>
+                </article>
+
+                <article class="method-card" style="--delay: 2">
+                    <span class="method-number" aria-hidden="true">03</span>
+                    <span class="method-badge">ALGORITHM</span>
+                    <h4 class="method-title">Score Computation</h4>
+                    <p class="method-description">Seven weighted factors combine into a single 0-100 trust score with real-time updates.</p>
+                </article>
+            </div>
+        </section>
+
+        <!-- Copy Trade CTA Section -->
+        <section class="section-block cta-section" aria-labelledby="cta-heading">
+            <div class="cta-content">
+                <span class="section-tag">COMING SOON</span>
+                <h2 class="cta-title" id="cta-heading">Copy Trading</h2>
+                <p class="cta-description">Mirror the bot's trades automatically in your own wallet. Real-time signals, your keys, your coins.</p>
+                
+                <div class="cta-features">
+                    <div class="cta-feature">
+                        <div class="cta-feature-icon" aria-hidden="true">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                                <path d="M12 2V6M12 18V22M4.93 4.93L7.76 7.76M16.24 16.24L19.07 19.07M2 12H6M18 12H22M4.93 19.07L7.76 16.24M16.24 7.76L19.07 4.93" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                            </svg>
+                        </div>
+                        <div class="cta-feature-text">
+                            <h5>Auto-Copy Trades</h5>
+                            <p>Automatically mirror positions</p>
                         </div>
                     </div>
-                    <div class="copy-trade-feature">
-                        <span class="feature-icon">&#128200;</span>
-                        <div class="feature-content">
-                            <h3>Real-Time Signals</h3>
-                            <p>Get instant notifications when the bot opens or closes positions</p>
+                    <div class="cta-feature">
+                        <div class="cta-feature-icon" aria-hidden="true">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                                <path d="M22 12H18L15 21L9 3L6 12H2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </div>
+                        <div class="cta-feature-text">
+                            <h5>Real-Time Signals</h5>
+                            <p>Instant notifications on trades</p>
                         </div>
                     </div>
-                    <div class="copy-trade-feature">
-                        <span class="feature-icon">&#128274;</span>
-                        <div class="feature-content">
-                            <h3>Your Keys, Your Coins</h3>
-                            <p>Trades execute from your wallet - you always control your funds</p>
+                    <div class="cta-feature">
+                        <div class="cta-feature-icon" aria-hidden="true">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                                <rect x="3" y="11" width="18" height="11" rx="2" stroke="currentColor" stroke-width="2"/>
+                                <path d="M7 11V7A5 5 0 0 1 17 7V11" stroke="currentColor" stroke-width="2"/>
+                            </svg>
+                        </div>
+                        <div class="cta-feature-text">
+                            <h5>Your Keys, Your Coins</h5>
+                            <p>You always control your funds</p>
                         </div>
                     </div>
                 </div>
-                <div class="copy-trade-cta">
-                    <p class="fee-disclosure">10% performance fee on profitable trades only</p>
-                    <button class="btn btn-primary btn-large" id="enableCopyTradeBtn" disabled>
-                        Connect Wallet to Enable
-                    </button>
-                </div>
+
+                <p class="cta-disclosure">10% performance fee on profitable trades only</p>
+                <button class="btn btn-primary btn-lg" id="enableCopyTradeBtn" type="button" disabled>
+                    Connect Wallet to Enable
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                        <path d="M6 3L12 9L6 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
             </div>
         </section>
     </main>
 
-    <!-- Footer -->
-    <footer class="footer">
+    <!-- ========================================
+         Footer
+         ======================================== -->
+    <footer class="footer" role="contentinfo">
         <div class="footer-left">
-            <span>TraderTony V4</span>
-            <span class="separator">|</span>
-            <span id="connectionStatus">Disconnected</span>
+            <span class="footer-brand">TraderTony V4</span>
+            <span class="footer-divider" aria-hidden="true">·</span>
+            <span class="footer-status" id="connectionStatus" role="status">Disconnected</span>
         </div>
         <div class="footer-right">
-            <a href="https://github.com/tony-42069/trader-tony-v4" target="_blank">GitHub</a>
-            <span class="separator">|</span>
-            <span id="lastUpdate">Last update: -</span>
+            <a href="https://github.com/tony-42069/trader-tony-v4" target="_blank" rel="noopener noreferrer" class="footer-link">GitHub</a>
+            <span class="footer-divider" aria-hidden="true">·</span>
+            <span class="footer-update" id="lastUpdate">Last update: —</span>
         </div>
     </footer>
 
-    <!-- Toast Notifications -->
-    <div class="toast-container" id="toastContainer"></div>
+    <!-- Toast Notification Container -->
+    <div class="toast-container" id="toastContainer" role="region" aria-label="Notifications" aria-live="polite"></div>
 
-    <!-- Scripts -->
-    <script src="js/config.js"></script>
-    <script src="js/api.js"></script>
-    <script src="js/websocket.js"></script>
-    <script src="js/wallet.js"></script>
-    <script src="js/app.js"></script>
+    <!-- ========================================
+         JavaScript Files
+         ======================================== -->
+    <script src="js/config.js?v=2025-01-23"></script>
+    <script src="js/api.js?v=2025-01-23"></script>
+    <script src="js/websocket.js?v=2025-01-23"></script>
+    <script src="js/wallet.js?v=2025-01-23"></script>
+    <script src="js/chart.js?v=2025-01-23"></script>
+    <script src="js/app.js?v=2025-01-23"></script>
 </body>
 </html>
