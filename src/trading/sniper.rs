@@ -269,7 +269,8 @@ mod tests {
 
     #[test]
     fn parses_gambling_present_tense() {
-        let msg = "Gamboling on $WIF\n\nABCdefGHIjklMNOpqrSTUvwxYZ12345678pump";
+        // Mint uses only base58 chars (excludes 0, O, I, l).
+        let msg = "Gamboling on $WIF\n\nHzAJ8x9QYpDsmZ3hRdWvL4kKbFntYg7uMcVjpump";
         let signal = parse_call_message(msg).expect("should parse");
         assert_eq!(signal.trigger, "Gamboling");
         assert_eq!(signal.ticker.as_deref(), Some("WIF"));
@@ -290,8 +291,8 @@ mod tests {
 
     #[test]
     fn rejects_non_pump_address() {
-        // Address ends in 'xyz' not 'pump' — should not match.
-        let msg = "Gamboled\n\nABCdefGHIjklMNOpqrSTUvwxYZ12345678xyz";
+        // Valid base58 chars but ends in 'xyz' not 'pump' — should not match.
+        let msg = "Gamboled\n\nHzAJ8x9QYpDsmZ3hRdWvL4kKbFntYg7uMcVjxyz";
         assert!(parse_call_message(msg).is_none());
     }
 
