@@ -1,0 +1,23 @@
+# fly.toml app configuration file generated for trader-tony-v4 on 2026-06-02T15:27:44-04:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'trader-tony-v4'
+primary_region = 'ord'
+
+[build]
+
+[http_service]
+  internal_port = 3030
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024
