@@ -21,6 +21,13 @@ use crate::web::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    eprintln!("=== TraderTony V4 main() entered ===");
+
+    // Catch panics so we see them in logs instead of a silent exit
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("=== PANIC === {}", info);
+    }));
+
     // Initialize logging
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
