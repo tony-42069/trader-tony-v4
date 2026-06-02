@@ -1266,13 +1266,14 @@ pub async fn set_active_strategy_type(
         "newpairs" | "new_pairs" | "sniper" => StrategyType::NewPairs,
         "finalstretch" | "final_stretch" | "bonding" => StrategyType::FinalStretch,
         "migrated" | "graduated" => StrategyType::Migrated,
+        "telegramcall" | "telegram_call" | "telegram" => StrategyType::TelegramCall,
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: "Invalid strategy type".to_string(),
                     details: Some(format!(
-                        "Valid types: NewPairs, FinalStretch, Migrated. Got: {}",
+                        "Valid types: NewPairs, FinalStretch, Migrated, TelegramCall. Got: {}",
                         req.strategy_type
                     )),
                 }),
