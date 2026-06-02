@@ -58,7 +58,7 @@ impl TelegramClient {
             ));
         }
 
-        info!("Connected to Telegram as authorised user");
+        info!("✅ Connected to Telegram as authorised user");
 
         Ok(Self {
             client,
@@ -83,7 +83,7 @@ impl TelegramClient {
             // Resolve channel handle to a chat once at startup.
             let chat = match client.resolve_username(&channel_handle).await {
                 Ok(Some(chat)) => {
-                    info!("Resolved TG channel @{} -> id {}", channel_handle, chat.id());
+                    info!("📡 Resolved TG channel @{} -> id {}", channel_handle, chat.id());
                     chat
                 }
                 Ok(None) => {
