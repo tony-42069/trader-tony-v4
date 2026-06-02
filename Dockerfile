@@ -18,13 +18,14 @@ WORKDIR /app
 # Copy manifests first for better caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create a dummy main.rs to build dependencies
-RUN mkdir src && \
-    echo "fn main() {}" > src/main.rs
+# Create dummy main.rs + bin stub so cargo can resolve all [[bin]] targets
+RUN mkdir -p src/bin && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "fn main() {}" > src/bin/tg_login.rs
 
 # Build dependencies (this layer will be cached)
 RUN cargo build --release && \
-    rm -rf src target/release/trader-tony-v4*
+    rm -rf src target/release/trader-tony-v4* target/release/tg_login*
 
 # Copy actual source code
 COPY src ./src
