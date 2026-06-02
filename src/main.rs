@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use dotenv::dotenv;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod api;
@@ -71,6 +71,54 @@ async fn main() -> Result<()> {
         if let Err(e) = trader.start().await {
             tracing::error!("Failed to auto-start trading: {}", e);
         }
+    }
+
+    // Start Telegram listener if creds are configured
+    if let (Some(api_id), Some(api_hash), Some(channel)) =
+        (config.tg_api_id, config.tg_api_hash.as_ref(), config.tg_channel.as_ref())
+    {
+        let session_path = std::path::PathBuf::from(&config.tg_session_path);
+        match crate::api::telegram::TelegramClient::connect(
+            api_id,
+            api_hash,
+            &session_path,
+            channel,
+        )
+        .await
+        {
+            Ok(tg) => {
+                // spawn_listener consumes `tg` by value and returns a text receiver.
+                let text_rx = tg.spawn_listener();
+
+                // Bridge text -> CallSignal by running the parser
+                let (sig_tx, sig_rx) = tokio::sync::mpsc::channel::<crate::trading::sniper::CallSignal>(32);
+                tokio::spawn(async move {
+                    let mut text_rx = text_rx;
+                    while let Some(text) = text_rx.recv().await {
+                        let preview: String = text.chars().take(60).collect();
+                        tracing::debug!("TG msg: {}...", preview);
+                        if let Some(signal) = crate::trading::sniper::parser::parse_call_message(&text) {
+                            info!("🎯 PARSED CALL: trigger={} mint={}", signal.trigger, signal.mint);
+                            if let Err(e) = sig_tx.send(signal).await {
+                                warn!("Failed to forward call signal: {:?}", e);
+                                break;
+                            }
+                        }
+                    }
+                });
+
+                let trader = auto_trader.lock().await;
+                trader.attach_telegram_signal_rx(sig_rx).await;
+                drop(trader);
+                info!("✅ Telegram listener active on @{}", channel.trim_start_matches('@'));
+            }
+            Err(e) => {
+                warn!("Failed to start Telegram client: {:?}", e);
+                warn!("Run `cargo run --bin tg_login` to authorise, then restart.");
+            }
+        }
+    } else {
+        info!("Telegram creds not set — sniper disabled");
     }
 
     // Create application state for web server

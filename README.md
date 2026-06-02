@@ -102,6 +102,28 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for full Railway + Vercel deployment guide.
 - **Start with Demo Mode** - Test thoroughly before live trading
 - **Review the code** - Understand the trading logic before deploying
 
+## Telegram Sniper Setup
+
+The Telegram-driven sniper requires a one-time interactive login to generate a session file.
+
+1. **Get API credentials** from https://my.telegram.org → API development tools.
+2. **Set env vars locally** in `.env`:
+   ```
+   TG_API_ID=1234567
+   TG_API_HASH=...
+   TG_PHONE=+14155551234
+   TG_CHANNEL=cryptoyeezuscalls
+   TG_SESSION_PATH=data/tg_session.session
+   ```
+3. **Run the login binary**:
+   ```
+   cargo run --bin tg_login
+   ```
+   Enter the SMS code (and 2FA password if applicable). On success a session file is written to `data/tg_session.session`.
+4. **For Railway deployment**: mount a volume at `/app/data` and copy the session file to it via SCP/Railway volume CLI. The main binary will reuse the session without re-login.
+
+Tune execution with `SNIPE_AMOUNT_SOL`, `SNIPE_SLIPPAGE_BPS`, `SNIPE_PRIORITY_FEE_MICRO_LAMPORTS`, `SNIPE_EXIT_DELAY_MS`, `SNIPE_EXIT_PERCENT`. Switch the active strategy to "Telegram Call (Snipe)" in the dashboard to arm the sniper.
+
 ## License
 
 MIT License - see LICENSE file for details.
