@@ -16,6 +16,20 @@ pub struct Config {
     pub birdeye_api_key: Option<String>,
     pub moralis_api_key: Option<String>,
 
+    // Telegram Sniper Configuration
+    pub tg_api_id: Option<i32>,
+    pub tg_api_hash: Option<String>,
+    pub tg_phone: Option<String>,
+    pub tg_channel: Option<String>,         // e.g. "cryptoyeezuscalls" or "@cryptoyeezuscalls"
+    pub tg_session_path: String,            // default "data/tg_session.session"
+
+    // Snipe Execution
+    pub snipe_amount_sol: f64,              // default 0.25
+    pub snipe_slippage_bps: u32,            // default 1500 (15%)
+    pub snipe_priority_fee_micro_lamports: u64,  // default 1_000_000 (1M μlamports = high priority)
+    pub snipe_exit_delay_ms: u64,           // default 3000 (3 seconds)
+    pub snipe_exit_percent: u32,            // default 90
+
     // Web API Configuration
     pub api_host: Option<String>,
     pub api_port: Option<u16>,
@@ -77,6 +91,26 @@ impl Config {
             jupiter_api_key: env::var("JUPITER_API_KEY").ok(),
             birdeye_api_key: env::var("BIRDEYE_API_KEY").ok(),
             moralis_api_key: env::var("MORALIS_API_KEY").ok(),
+
+            // Telegram Sniper
+            tg_api_id: env::var("TG_API_ID").ok().and_then(|v| v.parse().ok()),
+            tg_api_hash: env::var("TG_API_HASH").ok(),
+            tg_phone: env::var("TG_PHONE").ok(),
+            tg_channel: env::var("TG_CHANNEL").ok(),
+            tg_session_path: env::var("TG_SESSION_PATH")
+                .unwrap_or_else(|_| "data/tg_session.session".to_string()),
+
+            // Snipe Execution
+            snipe_amount_sol: env::var("SNIPE_AMOUNT_SOL")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(0.25),
+            snipe_slippage_bps: env::var("SNIPE_SLIPPAGE_BPS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(1500),
+            snipe_priority_fee_micro_lamports: env::var("SNIPE_PRIORITY_FEE_MICRO_LAMPORTS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000),
+            snipe_exit_delay_ms: env::var("SNIPE_EXIT_DELAY_MS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(3000),
+            snipe_exit_percent: env::var("SNIPE_EXIT_PERCENT")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(90),
 
             // Web API Configuration
             api_host: env::var("API_HOST").ok(),

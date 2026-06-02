@@ -18,6 +18,10 @@ pub enum StrategyType {
     /// Graduated to PumpSwap/Raydium - tokens that completed bonding curve
     /// Uses periodic scanner with Birdeye data
     Migrated,
+    /// Telegram channel call-out sniper. Listens to one channel, buys on
+    /// "Gamboled"/"Gamboling" messages containing a pump.fun mint, dumps
+    /// 90% after a short hold.
+    TelegramCall,
 }
 
 impl StrategyType {
@@ -26,6 +30,7 @@ impl StrategyType {
             StrategyType::NewPairs => "New Pairs",
             StrategyType::FinalStretch => "Final Stretch",
             StrategyType::Migrated => "Migrated",
+            StrategyType::TelegramCall => "Telegram Call",
         }
     }
 
@@ -34,6 +39,7 @@ impl StrategyType {
             StrategyType::NewPairs => "Sniper - catches tokens within milliseconds of creation",
             StrategyType::FinalStretch => "Tokens on bonding curve with proven traction (20-80% progress)",
             StrategyType::Migrated => "Tokens graduated to PumpSwap/Raydium with established liquidity",
+            StrategyType::TelegramCall => "Snipes tokens called out by a monitored Telegram channel",
         }
     }
 }
@@ -214,6 +220,48 @@ impl Strategy {
         }
     }
 
+    /// Create a Telegram Call sniper strategy with recommended defaults.
+    /// Position size and execution params live in Config (SNIPE_*), not here.
+    /// This strategy mostly carries the moonbag exit rules (after the 90% dump).
+    pub fn telegram_call(name: &str) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            enabled: true,
+            strategy_type: StrategyType::TelegramCall,
+            max_concurrent_positions: 3,
+            max_position_size_sol: 0.25,   // mirrors SNIPE_AMOUNT_SOL default
+            total_budget_sol: 2.0,
+            // Moonbag (10% remainder) exit rules:
+            stop_loss_percent: Some(50),    // very loose — moonbag is meant to ride
+            take_profit_percent: Some(500), // 5x on moonbag triggers full close
+            trailing_stop_percent: Some(30),
+            max_hold_time_minutes: 60,
+            // No discovery filters apply — TG signal is the filter.
+            min_liquidity_sol: 0,
+            max_risk_level: 100,
+            min_holders: 0,
+            max_token_age_minutes: 1440,
+            require_lp_burned: false,
+            reject_if_mint_authority: false,
+            reject_if_freeze_authority: false,
+            require_can_sell: false,
+            max_transfer_tax_percent: None,
+            max_concentration_percent: None,
+            min_volume_usd: None,
+            min_market_cap_usd: None,
+            min_bonding_progress: None,
+            require_migrated: None,
+            min_buy_ratio_percent: 0.0,
+            min_unique_wallets_24h: None,
+            slippage_bps: Some(1500),       // mirrors SNIPE_SLIPPAGE_BPS default
+            priority_fee_micro_lamports: Some(1_000_000),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     // Call this when updating strategy parameters
     pub fn touch(&mut self) {
         self.updated_at = Utc::now();
@@ -375,5 +423,25 @@ pub mod persistence {
         debug!("Saved {} strategies to file: {:?}", strategies_vec.len(), file_path);
         Ok(())
     }
-    
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telegram_call_factory_sets_expected_fields() {
+        let s = Strategy::telegram_call("test");
+        assert_eq!(s.strategy_type, StrategyType::TelegramCall);
+        assert_eq!(s.max_position_size_sol, 0.25);
+        assert_eq!(s.slippage_bps, Some(1500));
+        assert_eq!(s.stop_loss_percent, Some(50));
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn telegram_call_display_name() {
+        assert_eq!(StrategyType::TelegramCall.display_name(), "Telegram Call");
+    }
 }
