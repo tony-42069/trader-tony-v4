@@ -130,6 +130,15 @@ impl Sniper {
         let priority_fee = Some(self.config.snipe_priority_fee_micro_lamports);
         let symbol_for_log = signal.ticker.as_deref().unwrap_or("?");
 
+        // DRY-RUN SAFETY GATE: never hit Jupiter when DRY_RUN_MODE is on.
+        if self.config.dry_run_mode {
+            info!(
+                "🔍 [DRY RUN] Would snipe: trigger={} ticker={} mint={} amount={} SOL slippage={}bps (skipping real trade)",
+                signal.trigger, symbol_for_log, mint, amount_sol, slippage_bps
+            );
+            return Ok(());
+        }
+
         info!(
             "🚨 SNIPE FIRING: trigger={} ticker={} mint={} amount={} SOL slippage={}bps",
             signal.trigger, symbol_for_log, mint, amount_sol, slippage_bps
