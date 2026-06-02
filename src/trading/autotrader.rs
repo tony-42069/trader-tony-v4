@@ -26,6 +26,7 @@ use crate::trading::simulation::SimulationManager;
 use crate::trading::pumpfun::{PumpfunToken, BondingCurveState};
 use crate::trading::pumpfun_monitor::PumpfunMonitor;
 use crate::trading::graduation_monitor::{GraduationMonitor, GraduationEvent};
+use crate::trading::sniper::{CallSignal, Sniper};
 use crate::models::token::TokenMetadata;
 use solana_sdk::signature::Signature;
 use solana_sdk::pubkey::Pubkey;
@@ -458,6 +459,9 @@ pub struct AutoTrader {
     active_strategy_type: Arc<RwLock<crate::trading::strategy::StrategyType>>,
     watchlist: Arc<crate::trading::watchlist::Watchlist>,
     scanner: Arc<Mutex<Option<crate::trading::scanner::Scanner>>>,
+
+    // Telegram sniper signal receiver (for TelegramCall strategy)
+    tg_signal_rx: Arc<Mutex<Option<mpsc::Receiver<CallSignal>>>>,
 }
 
 impl AutoTrader {
@@ -547,6 +551,8 @@ impl AutoTrader {
             active_strategy_type: Arc::new(RwLock::new(crate::trading::strategy::StrategyType::NewPairs)),
             watchlist,
             scanner: Arc::new(Mutex::new(None)), // Scanner initialized in start() when needed
+            // Telegram sniper signal receiver — injected later by main.rs
+            tg_signal_rx: Arc::new(Mutex::new(None)),
         };
         
         // Initialize by loading strategies - use await directly since we're in an async function
@@ -783,6 +789,14 @@ impl AutoTrader {
         Ok(())
     }
 
+    /// Inject a Telegram call-signal receiver. Called by `main.rs` after the
+    /// Telegram client is started.
+    pub async fn attach_telegram_signal_rx(&self, rx: mpsc::Receiver<CallSignal>) {
+        let mut guard = self.tg_signal_rx.lock().await;
+        *guard = Some(rx);
+        info!("📡 Telegram signal receiver attached to AutoTrader");
+    }
+
     /// Get watchlist reference
     pub fn get_watchlist(&self) -> Arc<crate::trading::watchlist::Watchlist> {
         self.watchlist.clone()
@@ -864,6 +878,12 @@ impl AutoTrader {
             None
         };
 
+        // Take the Telegram signal receiver if present
+        let tg_signal_rx = {
+            let mut guard = self.tg_signal_rx.lock().await;
+            guard.take()
+        };
+
         // Clone watchlist for use in the task
         let watchlist = self.watchlist.clone();
 
@@ -900,6 +920,7 @@ impl AutoTrader {
 
             // Wrap the receiver in an Option so we can use it in the select!
             let mut token_rx = pumpfun_token_rx;
+            let mut tg_rx = tg_signal_rx;
 
             loop {
                 // Check if we should stop
@@ -959,6 +980,46 @@ impl AutoTrader {
                             }
                         } else {
                             warn!("Token channel closed - no more tokens will be received");
+                        }
+                    }
+
+                    // Telegram call signal (TelegramCall strategy only)
+                    signal = async {
+                        if let Some(ref mut rx) = tg_rx {
+                            rx.recv().await
+                        } else {
+                            std::future::pending::<Option<CallSignal>>().await
+                        }
+                    } => {
+                        if let Some(signal) = signal {
+                            let current = active_strategy_type.read().await.clone();
+                            if current != crate::trading::strategy::StrategyType::TelegramCall {
+                                info!("📨 TG call received but active strategy is {:?} — ignoring", current);
+                                continue;
+                            }
+
+                            // Find the TelegramCall strategy (or use defaults)
+                            let strats = strategies.read().await;
+                            let strategy = strats.values()
+                                .find(|s| s.enabled && s.strategy_type == crate::trading::strategy::StrategyType::TelegramCall)
+                                .cloned()
+                                .unwrap_or_else(|| crate::trading::strategy::Strategy::telegram_call("default-tg"));
+                            drop(strats);
+
+                            // Build a one-shot Sniper and run the snipe inline (spawned).
+                            let sniper = std::sync::Arc::new(Sniper::new(
+                                config.clone(),
+                                jupiter_client.clone(),
+                                wallet_manager.clone(),
+                                position_manager.clone(),
+                                strategy,
+                            ));
+                            let signal_clone = signal.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = sniper.execute_snipe_public(signal_clone).await {
+                                    error!("Snipe execution failed: {:?}", e);
+                                }
+                            });
                         }
                     }
 
