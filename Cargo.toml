@@ -58,6 +58,21 @@ lazy_static = "1.4"
 # Storage
 sled = "0.34"  # Embedded database
 
+# Telegram (MTProto)
+grammers-client = "0.7"
+grammers-session = "0.7"
+
+# Regex (for call-message parsing)
+regex = "1.10"
+
+[[bin]]
+name = "trader-tony-v4"
+path = "src/main.rs"
+
+[[bin]]
+name = "tg_login"
+path = "src/bin/tg_login.rs"
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockito = "1.1"
