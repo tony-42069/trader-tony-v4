@@ -7,11 +7,21 @@
 //! Once the session file exists, this module reuses it without interaction.
 
 use anyhow::{anyhow, Context, Result};
-use grammers_client::{Client, Config, InitParams, Update};
+use grammers_client::{Client, Config, FixedReconnect, InitParams, Update};
 use grammers_session::Session;
 use std::path::Path;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+
+/// Reconnection policy: grammers defaults to NoReconnect, which makes the
+/// client give up permanently when Telegram drops the socket (routine on
+/// long-lived connections from datacenter IPs). We retry effectively forever
+/// with a 2s gap so the listener survives 24/7.
+static RECONNECT_POLICY: FixedReconnect = FixedReconnect {
+    attempts: usize::MAX,
+    delay: Duration::from_secs(2),
+};
 
 /// Wraps a grammers Client subscribed to one channel.
 pub struct TelegramClient {
@@ -45,6 +55,7 @@ impl TelegramClient {
             api_hash: api_hash.to_string(),
             params: InitParams {
                 catch_up: false, // do NOT replay history on startup — only live messages
+                reconnection_policy: &RECONNECT_POLICY, // survive socket drops
                 ..Default::default()
             },
         })
@@ -103,13 +114,26 @@ impl TelegramClient {
             };
             let target_chat_id = chat.id();
 
+            // Track consecutive errors so we don't flood logs at 2s intervals if
+            // the reconnection policy is also struggling. Backs off up to 30s.
+            let mut consecutive_errors: u32 = 0;
             loop {
                 // next_update returns Result<Update, InvocationError> (not Option).
+                // With FixedReconnect set on the client, the background sender
+                // reconnects transparently, so this should rarely error now.
                 let update = match client.next_update().await {
-                    Ok(update) => update,
+                    Ok(update) => {
+                        consecutive_errors = 0;
+                        update
+                    }
                     Err(e) => {
-                        error!("TG next_update error: {:?} — retrying in 2s", e);
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        consecutive_errors += 1;
+                        // Log first error and then every 30th to avoid spam.
+                        if consecutive_errors == 1 || consecutive_errors % 30 == 0 {
+                            warn!("TG next_update error (x{}): {:?} — will keep retrying", consecutive_errors, e);
+                        }
+                        let backoff = std::cmp::min(2 * consecutive_errors as u64, 30);
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
                         continue;
                     }
                 };
