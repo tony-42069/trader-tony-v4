@@ -79,10 +79,19 @@ impl MoralisPumpToken {
 }
 
 /// Response for holder stats endpoint
+/// NOTE: totalHolders is signed because Moralis occasionally returns negative
+/// values (data glitch). A failed parse here used to abort entire scan cycles.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HolderStatsResponse {
-    pub total_holders: Option<u64>,
+    pub total_holders: Option<i64>,
+}
+
+impl HolderStatsResponse {
+    /// Holder count, clamped to a sane value
+    pub fn holder_count(&self) -> u64 {
+        self.total_holders.map(|h| h.max(0) as u64).unwrap_or(0)
+    }
 }
 
 /// Combined token data with holder count
@@ -218,12 +227,15 @@ impl MoralisClient {
             return Ok(0);
         }
 
-        let response_data: HolderStatsResponse = response
-            .json()
-            .await
-            .context("Failed to parse Moralis holders response")?;
+        let response_data: HolderStatsResponse = match response.json().await {
+            Ok(data) => data,
+            Err(e) => {
+                warn!("Failed to parse Moralis holders response for {}: {:?}; treating as 0 holders", token_address, e);
+                return Ok(0);
+            }
+        };
 
-        Ok(response_data.total_holders.unwrap_or(0))
+        Ok(response_data.holder_count())
     }
 
     /// Scan for Final Stretch candidates
@@ -323,12 +335,19 @@ impl MoralisClient {
         info!("   {} tokens passed initial filters, fetching holder counts...", candidates.len());
 
         // 3. Fetch holder counts and filter
+        // A failure for ONE token must not abort the whole batch - skip it instead.
         let mut results = Vec::new();
         for token in candidates {
             // Small delay to avoid rate limiting
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let holders = self.get_holder_count(&token.token_address).await?;
+            let holders = match self.get_holder_count(&token.token_address).await {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!("   {} skipped: holder lookup failed ({:?})", token.symbol, e);
+                    continue;
+                }
+            };
 
             if holders >= min_holders {
                 info!("🔥 [FINAL STRETCH] {} ({}) - Progress: {:.1}%, MCap: ${:.0}, Holders: {}",
@@ -408,11 +427,18 @@ impl MoralisClient {
         info!("   {} tokens passed initial filters, fetching holder counts...", candidates.len());
 
         // 3. Fetch holder counts and filter
+        // A failure for ONE token must not abort the whole batch - skip it instead.
         let mut results = Vec::new();
         for token in candidates {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let holders = self.get_holder_count(&token.token_address).await?;
+            let holders = match self.get_holder_count(&token.token_address).await {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!("   {} skipped: holder lookup failed ({:?})", token.symbol, e);
+                    continue;
+                }
+            };
 
             if holders >= min_holders {
                 info!("🚀 [MIGRATED] {} ({}) - MCap: ${:.0}, Holders: {}, Graduated: {:?}",
@@ -431,6 +457,28 @@ impl MoralisClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn holder_stats_tolerates_negative_count() {
+        // Moralis occasionally returns a negative totalHolders (data glitch).
+        // This must parse successfully and clamp to 0, not abort the scan.
+        let resp: HolderStatsResponse =
+            serde_json::from_str(r#"{"totalHolders":-72}"#).expect("negative count must parse");
+        assert_eq!(resp.holder_count(), 0);
+    }
+
+    #[test]
+    fn holder_stats_parses_normal_count() {
+        let resp: HolderStatsResponse =
+            serde_json::from_str(r#"{"totalHolders":902}"#).unwrap();
+        assert_eq!(resp.holder_count(), 902);
+    }
+
+    #[test]
+    fn holder_stats_parses_missing_count() {
+        let resp: HolderStatsResponse = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(resp.holder_count(), 0);
+    }
 
     #[test]
     fn test_moralis_pump_token_parsing() {
