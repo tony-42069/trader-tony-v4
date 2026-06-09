@@ -603,6 +603,8 @@ impl AutoTrader {
         let mut strategies = self.strategies.write().await;
         *strategies = loaded_strategies;
 
+        let mut modified = false;
+
         // If no strategies loaded, create defaults for all three strategy types
         if strategies.is_empty() {
             info!("📋 No strategies found - creating default strategies for all types...");
@@ -624,11 +626,7 @@ impl AutoTrader {
             info!("✅ Created '{}' strategy (disabled)", np_strategy.name);
             strategies.insert(np_strategy.id.clone(), np_strategy);
 
-            // Save the default strategies to disk
-            drop(strategies); // Release lock before saving
-            if let Err(e) = self.save_strategies().await {
-                warn!("Failed to save default strategies to disk: {}", e);
-            }
+            modified = true;
         } else {
             info!("Loaded {} strategies", strategies.len());
         }
@@ -637,6 +635,23 @@ impl AutoTrader {
         // always boots into the intended mode (otherwise the bot can silently
         // revert and stop sniping). Defaults to FinalStretch when unset.
         let desired = Self::active_strategy_from_env();
+
+        // Guarantee an enabled strategy of the active type exists - persisted
+        // files can predate a strategy type or have it disabled, which would
+        // leave the scanner with no criteria and the bot silently idle.
+        if crate::trading::strategy::ensure_enabled_strategy(&mut strategies, &desired) {
+            info!("🛠️ No enabled {:?} strategy found - created/enabled one with default criteria", desired);
+            modified = true;
+        }
+
+        drop(strategies); // Release lock before saving
+
+        if modified {
+            if let Err(e) = self.save_strategies().await {
+                warn!("Failed to save strategies to disk: {}", e);
+            }
+        }
+
         {
             let mut active = self.active_strategy_type.write().await;
             *active = desired.clone();
@@ -933,7 +948,7 @@ impl AutoTrader {
 
             // Create scanner for Final Stretch / Migrated strategies if Moralis is available
             let scanner = moralis_client.as_ref().map(|mc| {
-                info!("📡 Moralis scanner created - will poll every 15 seconds for FinalStretch/Migrated");
+                info!("📡 Moralis scanner created - will poll every 30 seconds for FinalStretch/Migrated");
                 crate::trading::scanner::Scanner::new(mc.clone(), birdeye_client.clone())
             });
             if scanner.is_none() {

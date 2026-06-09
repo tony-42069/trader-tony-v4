@@ -321,6 +321,41 @@ impl Strategy {
     }
 }
 
+/// Ensure the strategy map contains an ENABLED strategy of the given type.
+/// Creates one from the factory defaults if missing, or re-enables a disabled one.
+/// Returns true if the map was modified (caller should persist to disk).
+pub fn ensure_enabled_strategy(
+    strategies: &mut std::collections::HashMap<String, Strategy>,
+    strategy_type: &StrategyType,
+) -> bool {
+    if strategies
+        .values()
+        .any(|s| s.enabled && &s.strategy_type == strategy_type)
+    {
+        return false;
+    }
+
+    // A disabled strategy of this type exists — re-enable it rather than duplicating
+    if let Some(existing) = strategies
+        .values_mut()
+        .find(|s| &s.strategy_type == strategy_type)
+    {
+        existing.enabled = true;
+        existing.touch();
+        return true;
+    }
+
+    // None at all — create one from the factory defaults
+    let strategy = match strategy_type {
+        StrategyType::NewPairs => Strategy::default("New Pairs Scout"),
+        StrategyType::FinalStretch => Strategy::final_stretch("Final Stretch Scout"),
+        StrategyType::Migrated => Strategy::migrated("Migrated Scout"),
+        StrategyType::TelegramCall => Strategy::telegram_call("Telegram Call Sniper"),
+    };
+    strategies.insert(strategy.id.clone(), strategy);
+    true
+}
+
 // Utility functions for strategy persistence (independent of AutoTrader)
 pub mod persistence {
     use super::*;
@@ -443,5 +478,52 @@ mod tests {
     #[test]
     fn telegram_call_display_name() {
         assert_eq!(StrategyType::TelegramCall.display_name(), "Telegram Call");
+    }
+
+    #[test]
+    fn ensure_enabled_strategy_creates_missing_migrated() {
+        let mut strategies = std::collections::HashMap::new();
+        // Map only has a NewPairs strategy - no Migrated at all
+        let np = Strategy::default("New Pairs Scout");
+        strategies.insert(np.id.clone(), np);
+
+        let changed = ensure_enabled_strategy(&mut strategies, &StrategyType::Migrated);
+
+        assert!(changed, "should report modification when creating a strategy");
+        let migrated: Vec<_> = strategies
+            .values()
+            .filter(|s| s.strategy_type == StrategyType::Migrated)
+            .collect();
+        assert_eq!(migrated.len(), 1, "exactly one Migrated strategy should exist");
+        assert!(migrated[0].enabled, "created strategy must be enabled");
+    }
+
+    #[test]
+    fn ensure_enabled_strategy_reenables_disabled() {
+        let mut strategies = std::collections::HashMap::new();
+        let mut mig = Strategy::migrated("Migrated Scout");
+        mig.enabled = false;
+        let mig_id = mig.id.clone();
+        strategies.insert(mig_id.clone(), mig);
+
+        let changed = ensure_enabled_strategy(&mut strategies, &StrategyType::Migrated);
+
+        assert!(changed, "should report modification when re-enabling");
+        assert_eq!(strategies.len(), 1, "must not create a duplicate");
+        assert!(strategies[&mig_id].enabled, "existing strategy must be re-enabled");
+    }
+
+    #[test]
+    fn ensure_enabled_strategy_noop_when_already_enabled() {
+        let mut strategies = std::collections::HashMap::new();
+        let mig = Strategy::migrated("Migrated Scout");
+        let mig_id = mig.id.clone();
+        strategies.insert(mig_id.clone(), mig);
+
+        let changed = ensure_enabled_strategy(&mut strategies, &StrategyType::Migrated);
+
+        assert!(!changed, "no modification expected when enabled strategy exists");
+        assert_eq!(strategies.len(), 1);
+        assert!(strategies[&mig_id].enabled);
     }
 }
