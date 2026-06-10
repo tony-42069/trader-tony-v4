@@ -268,6 +268,18 @@ mod tests {
 
     const REAL_SAMPLE: &str = "Gamboled a bag here on $RETARD. Everybody in crypto feeling like this right now with the current market so heavy mindshare here, could be a runner. DYOR NFA.\n\nhttps://dexscreener.com/solana/J4kiZJMAge9qendsAfDeQXoanHqLHdR6RcCybeitcHJo\n\nhttps://retardcoin.wtf/\n\nhttps://x.com/OfficialRetardX\n\nhttps://t.me/BunchOfRetards\n\nACuZX4asxyqcRd6BTgGBKXJjViUP3kZQuDUQawBapump";
 
+    // Second real call (BIBI, 2026-06-10). The mint is at the upper length
+    // boundary (40 base58 chars + "pump" = 44 total) — guards the regex bound.
+    const REAL_SAMPLE_BIBI: &str = "Gamboled a bag on $BIBI on $SOL. $BIBI is the official binance mascot and AI assistant. \n\nThis might be an easy front run imo with the 9th binance anniversary fast approaching and $BIBI being included into binance vip gift box, I expect to see $BIBI being mentioned heavily on X by Binance and their affiliates.\n\nWe are overdue a Binance meme season and we saw last cycle multiple Binance based memes run to 50-100M fast, $BIBI has insane mindshare and is the official mascot. DYOR NFA.\n\nhttps://dexscreener.com/solana/E6oLTppHWxBFuNNowsecZZAXobfKmit8kZTSi2uH2ZFV\n\nhttps://x.com/AiAgentBIBI\n\nhttps://bibi.exchange/\n\nhttps://t.me/AgentBIBI\n\n6MLWMbv4yP67A1zHFLHgDSEDTQBx7z9BWr8Zxyt3pump";
+
+    #[test]
+    fn parses_the_real_bibi_sample() {
+        let signal = parse_call_message(REAL_SAMPLE_BIBI).expect("BIBI call should parse");
+        assert_eq!(signal.mint, "6MLWMbv4yP67A1zHFLHgDSEDTQBx7z9BWr8Zxyt3pump");
+        assert_eq!(signal.ticker.as_deref(), Some("BIBI"));
+        assert_eq!(signal.trigger, "Gamboled");
+    }
+
     #[test]
     fn parses_the_real_retard_sample() {
         let signal = parse_call_message(REAL_SAMPLE).expect("should parse");
