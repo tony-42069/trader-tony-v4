@@ -1,14 +1,14 @@
 /**
  * TraderTony V4 - Configuration
  * Environment-specific settings
- * VERSION: 2025-01-10-v3
+ * VERSION: 2026-06-10-v4 (Fly.io backend)
  */
 
-// Force Railway backend URLs (not Vercel)
-window.API_BASE_URL = 'https://trader-tony.up.railway.app';
-window.WS_URL = 'wss://trader-tony.up.railway.app/ws';
+// Fly.io backend URLs (moved off Railway June 2026)
+window.API_BASE_URL = 'https://trader-tony-v4.fly.dev';
+window.WS_URL = 'wss://trader-tony-v4.fly.dev/ws';
 
-console.log('[Config] VERSION: 2025-01-10-v3');
+console.log('[Config] VERSION: 2026-06-10-v4');
 console.log('[Config] API_BASE_URL:', window.API_BASE_URL);
 
 // WebSocket URL is set above - Railway backend only
