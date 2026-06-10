@@ -9,10 +9,12 @@ primary_region = 'ord'
 [build]
 
 [env]
-  # Boot directly into the Migrated (graduated tokens) strategy and start
-  # trading without manual intervention. NOTE: `fly secrets` with the same
-  # name override these values - keep ACTIVE_STRATEGY out of secrets.
-  ACTIVE_STRATEGY = 'migrated'
+  # Boot directly into the TelegramCall sniper and start trading without
+  # manual intervention. TelegramCall mode listens to @cryptoyeezuscalls and
+  # does NOT call Moralis (so it won't burn the Moralis quota). NOTE: `fly
+  # secrets` with the same name override these values - keep ACTIVE_STRATEGY
+  # out of secrets.
+  ACTIVE_STRATEGY = 'telegram_call'
   AUTO_START_TRADING = 'true'
   RUST_LOG = 'info'
   # Safe default: simulate trades. Go live with:
