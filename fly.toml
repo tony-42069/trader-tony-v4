@@ -15,6 +15,11 @@ primary_region = 'ord'
   ACTIVE_STRATEGY = 'migrated'
   AUTO_START_TRADING = 'true'
   RUST_LOG = 'info'
+  # Safe default: simulate trades. Go live with:
+  #   fly secrets set DRY_RUN_MODE=false
+  # (secrets override this value; unset the secret to return to dry-run)
+  DRY_RUN_MODE = 'true'
+  DEMO_MODE = 'false'
 
 [http_service]
   internal_port = 3030

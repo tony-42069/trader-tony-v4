@@ -506,7 +506,7 @@ impl AutoTrader {
         // Initialize SimulationManager if dry_run_mode is enabled
         let simulation_manager = if config.dry_run_mode {
             info!("🔍 [DRY RUN] Mode enabled - trades will be simulated, not executed");
-            let sim_mgr = Arc::new(SimulationManager::new(birdeye_client.clone()));
+            let sim_mgr = Arc::new(SimulationManager::new(moralis_client.clone()));
             // Load existing simulated positions
             if let Err(e) = sim_mgr.load().await {
                 warn!("Failed to load simulated positions: {}", e);
@@ -904,7 +904,6 @@ impl AutoTrader {
         let jupiter_client = self.jupiter_client.clone();
         let simulation_manager = self.simulation_manager.clone();
         let moralis_client = self.moralis_client.clone();
-        let birdeye_client = self.birdeye_client.clone();
 
 
         // Take the Pump.fun token receiver for use in the task (if in dry run mode)
@@ -949,7 +948,7 @@ impl AutoTrader {
             // Create scanner for Final Stretch / Migrated strategies if Moralis is available
             let scanner = moralis_client.as_ref().map(|mc| {
                 info!("📡 Moralis scanner created - will poll every 30 seconds for FinalStretch/Migrated");
-                crate::trading::scanner::Scanner::new(mc.clone(), birdeye_client.clone())
+                crate::trading::scanner::Scanner::new(mc.clone())
             });
             if scanner.is_none() {
                 warn!("⚠️ Moralis scanner NOT created - moralis_client is None");
@@ -1139,8 +1138,11 @@ impl AutoTrader {
                                     drop(strats);
 
                                     if let Some(strategy) = matching_strategy {
-                                        // Fetch SOL price for USD->SOL conversion
-                                        let sol_price_usd = birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
+                                        // Fetch SOL price for USD->SOL conversion (Moralis, cached 60s)
+                                        let sol_price_usd = match moralis_client.as_ref() {
+                                            Some(mc) => mc.get_sol_price_usd().await,
+                                            None => 150.0,
+                                        };
 
                                         // Run the scanner
                                         match sc.scan_cycle(&strategy).await {
@@ -1281,8 +1283,11 @@ impl AutoTrader {
                                             default_strategy.min_market_cap_usd.unwrap_or(0.0),
                                             default_strategy.min_bonding_progress.unwrap_or(0.0));
 
-                                        // Fetch SOL price for USD->SOL conversion
-                                        let sol_price_usd = birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
+                                        // Fetch SOL price for USD->SOL conversion (Moralis, cached 60s)
+                                        let sol_price_usd = match moralis_client.as_ref() {
+                                            Some(mc) => mc.get_sol_price_usd().await,
+                                            None => 150.0,
+                                        };
 
                                         // Run scanner with default strategy
                                         match sc.scan_cycle(&default_strategy).await {
