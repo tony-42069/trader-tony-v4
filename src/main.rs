@@ -21,6 +21,13 @@ use crate::web::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    eprintln!("=== TraderTony V4 main() entered ===");
+
+    // Catch panics so we see them in logs instead of a silent exit
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("=== PANIC === {}", info);
+    }));
+
     // Initialize logging
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
@@ -70,6 +77,26 @@ async fn main() -> Result<()> {
         let trader = auto_trader.lock().await;
         if let Err(e) = trader.start().await {
             tracing::error!("Failed to auto-start trading: {}", e);
+        }
+    }
+
+    // If TG_SESSION_B64 is set and the session file doesn't exist, decode and write it.
+    // Lets us ship the session via env var on Railway instead of needing a volume mount.
+    if let Ok(b64) = std::env::var("TG_SESSION_B64") {
+        let session_path = std::path::PathBuf::from(&config.tg_session_path);
+        let trimmed = b64.trim();
+        if !session_path.exists() && !trimmed.is_empty() {
+            if let Some(parent) = session_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            use base64::Engine as _;
+            match base64::engine::general_purpose::STANDARD.decode(trimmed) {
+                Ok(bytes) => match std::fs::write(&session_path, &bytes) {
+                    Ok(_) => info!("✅ Restored TG session from TG_SESSION_B64 env var ({} bytes)", bytes.len()),
+                    Err(e) => tracing::error!("Failed to write TG session from env var: {:?}", e),
+                },
+                Err(e) => tracing::error!("Failed to decode TG_SESSION_B64: {:?}", e),
+            }
         }
     }
 

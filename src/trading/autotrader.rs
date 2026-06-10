@@ -624,12 +624,6 @@ impl AutoTrader {
             info!("✅ Created '{}' strategy (disabled)", np_strategy.name);
             strategies.insert(np_strategy.id.clone(), np_strategy);
 
-            // Set default active strategy to FinalStretch
-            let mut active = self.active_strategy_type.write().await;
-            *active = crate::trading::strategy::StrategyType::FinalStretch;
-            drop(active);
-            info!("📋 Default active strategy set to FinalStretch");
-
             // Save the default strategies to disk
             drop(strategies); // Release lock before saving
             if let Err(e) = self.save_strategies().await {
@@ -639,7 +633,35 @@ impl AutoTrader {
             info!("Loaded {} strategies", strategies.len());
         }
 
+        // Set the active strategy from the ACTIVE_STRATEGY env var so a restart
+        // always boots into the intended mode (otherwise the bot can silently
+        // revert and stop sniping). Defaults to FinalStretch when unset.
+        let desired = Self::active_strategy_from_env();
+        {
+            let mut active = self.active_strategy_type.write().await;
+            *active = desired.clone();
+        }
+        info!("📋 Active strategy set to {:?} (from ACTIVE_STRATEGY env, default FinalStretch)", desired);
+
         Ok(())
+    }
+
+    /// Parse the ACTIVE_STRATEGY env var into a StrategyType.
+    /// Accepts the same aliases as the /api/strategy/active endpoint.
+    /// Defaults to FinalStretch when unset or unrecognised.
+    fn active_strategy_from_env() -> crate::trading::strategy::StrategyType {
+        use crate::trading::strategy::StrategyType;
+        match std::env::var("ACTIVE_STRATEGY")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "newpairs" | "new_pairs" | "sniper" => StrategyType::NewPairs,
+            "finalstretch" | "final_stretch" | "bonding" => StrategyType::FinalStretch,
+            "migrated" | "graduated" => StrategyType::Migrated,
+            "telegramcall" | "telegram_call" | "telegram" => StrategyType::TelegramCall,
+            _ => StrategyType::FinalStretch,
+        }
     }
     
     /// Saves strategies to disk

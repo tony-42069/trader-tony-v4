@@ -47,6 +47,10 @@ async fn main() -> Result<()> {
         );
         Session::load_file(&session_path).context("Failed to load existing session")?
     } else {
+        // grammers-session 0.7.0's save_to_file uses OpenOptions::open without
+        // create(true), so it requires the file to exist. Pre-create it now.
+        std::fs::File::create(&session_path)
+            .with_context(|| format!("Failed to pre-create session file at {:?}", session_path))?;
         Session::new()
     };
 

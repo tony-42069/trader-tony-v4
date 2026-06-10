@@ -192,6 +192,10 @@ impl Scanner {
             StrategyType::Migrated => {
                 self.scan_migrated(strategy).await
             }
+            StrategyType::TelegramCall => {
+                debug!("TelegramCall strategy uses TG listener, not scanner");
+                Ok(vec![])
+            }
         }
     }
 
