@@ -66,7 +66,7 @@ pub mod parser {
     }
 }
 
-use crate::api::jupiter::JupiterClient;
+use crate::api::jupiter::{JupiterClient, SOL_MINT};
 use crate::config::Config;
 use crate::solana::wallet::WalletManager;
 use crate::trading::position::PositionManager;
@@ -80,6 +80,33 @@ use tracing::{error, info, warn};
 /// Pump.fun tokens use 9 decimals. This matches the assumption in the existing
 /// `autotrader.rs` code path that processes Pump.fun tokens.
 const PUMP_FUN_TOKEN_DECIMALS: u8 = 9;
+
+/// Best-effort market-cap lookup via the free dexscreener API (no key needed).
+/// Returns None on any failure — used only for dry-run reporting, never the
+/// live hot path.
+async fn fetch_market_cap(mint: &str) -> Option<f64> {
+    let url = format!("https://api.dexscreener.com/latest/dex/tokens/{}", mint);
+    let resp = reqwest::get(&url).await.ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let pairs = json.get("pairs")?.as_array()?;
+    for p in pairs {
+        if let Some(mc) = p.get("marketCap").and_then(|v| v.as_f64()) {
+            return Some(mc);
+        }
+        if let Some(fdv) = p.get("fdv").and_then(|v| v.as_f64()) {
+            return Some(fdv);
+        }
+    }
+    None
+}
+
+/// Format an optional market cap as "$123,456" or "unknown".
+fn fmt_mc(mc: Option<f64>) -> String {
+    match mc {
+        Some(v) => format!("${:.0}", v),
+        None => "unknown".to_string(),
+    }
+}
 
 /// Snipe orchestrator. Owns the references needed to buy + exit.
 pub struct Sniper {
@@ -130,12 +157,94 @@ impl Sniper {
         let priority_fee = Some(self.config.snipe_priority_fee_micro_lamports);
         let symbol_for_log = signal.ticker.as_deref().unwrap_or("?");
 
-        // DRY-RUN SAFETY GATE: never hit Jupiter when DRY_RUN_MODE is on.
+        // DRY-RUN SIMULATION: fetch real read-only Jupiter quotes + market cap
+        // for the buy and the sell, but never submit a transaction. This shows
+        // exactly what the snipe would have done (entry/exit MC, price impact,
+        // simulated SOL P&L) without spending anything.
         if self.config.dry_run_mode {
+            let exit_delay_ms = self.config.snipe_exit_delay_ms;
+            let exit_percent = self.config.snipe_exit_percent.clamp(1, 100);
+
             info!(
-                "🔍 [DRY RUN] Would snipe: trigger={} ticker={} mint={} amount={} SOL slippage={}bps (skipping real trade)",
+                "🔍 [DRY RUN] Call detected: trigger={} ticker={} mint={} (simulating {} SOL @ {}bps)",
                 signal.trigger, symbol_for_log, mint, amount_sol, slippage_bps
             );
+
+            // --- SIMULATED BUY (read-only quote) ---
+            let entry_mc = fetch_market_cap(mint).await;
+            let lamports_in = (amount_sol * 1_000_000_000.0) as u64;
+            let buy_quote = self
+                .jupiter
+                .get_quote(SOL_MINT, mint, lamports_in, slippage_bps)
+                .await;
+
+            let tokens_out_ui = match buy_quote {
+                Ok(ref q) => {
+                    let raw = q.out_amount.parse::<f64>().unwrap_or(0.0);
+                    let tokens = raw / 10f64.powi(PUMP_FUN_TOKEN_DECIMALS as i32);
+                    let impact = q
+                        .price_impact_pct
+                        .as_deref()
+                        .unwrap_or("0")
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    info!(
+                        "🔍 [DRY RUN] WOULD BUY {} for {} SOL → ~{:.0} {} | price impact {:.2}% | entry MC {}",
+                        symbol_for_log, amount_sol, tokens, symbol_for_log, impact, fmt_mc(entry_mc)
+                    );
+                    tokens
+                }
+                Err(ref e) => {
+                    warn!(
+                        "🔍 [DRY RUN] BUY quote FAILED for {} (token may not be on Jupiter yet / not migrated): {:?} | entry MC {}",
+                        mint, e, fmt_mc(entry_mc)
+                    );
+                    return Ok(());
+                }
+            };
+
+            if tokens_out_ui <= 0.0 {
+                warn!("🔍 [DRY RUN] BUY quote returned zero tokens — aborting sim");
+                return Ok(());
+            }
+
+            // --- HOLD ---
+            info!("🔍 [DRY RUN] Holding {}ms before simulated {}% dump...", exit_delay_ms, exit_percent);
+            sleep(Duration::from_millis(exit_delay_ms)).await;
+
+            // --- SIMULATED SELL (read-only quote for the dumped portion) ---
+            let exit_mc = fetch_market_cap(mint).await;
+            let dump_tokens_ui = tokens_out_ui * (exit_percent as f64) / 100.0;
+            let dump_base = (dump_tokens_ui * 10f64.powi(PUMP_FUN_TOKEN_DECIMALS as i32)) as u64;
+            let sell_quote = self
+                .jupiter
+                .get_quote(mint, SOL_MINT, dump_base, slippage_bps)
+                .await;
+
+            match sell_quote {
+                Ok(ref q) => {
+                    let sol_out = q.out_amount.parse::<f64>().unwrap_or(0.0) / 1_000_000_000.0;
+                    let spent_on_dump = amount_sol * (exit_percent as f64) / 100.0;
+                    let pnl = sol_out - spent_on_dump;
+                    let pnl_pct = if spent_on_dump > 0.0 { pnl / spent_on_dump * 100.0 } else { 0.0 };
+                    info!(
+                        "🔍 [DRY RUN] WOULD SELL {}% after {}ms → ~{:.4} SOL | exit MC {} | SIMULATED P&L on dumped portion: {:+.4} SOL ({:+.1}%)",
+                        exit_percent, exit_delay_ms, sol_out, fmt_mc(exit_mc), pnl, pnl_pct
+                    );
+                    let mc_move = match (entry_mc, exit_mc) {
+                        (Some(a), Some(b)) if a > 0.0 => format!("{:+.1}%", (b - a) / a * 100.0),
+                        _ => "n/a".to_string(),
+                    };
+                    info!(
+                        "🔍 [DRY RUN] SUMMARY {}: entry MC {} → exit MC {} ({}) over {}ms",
+                        symbol_for_log, fmt_mc(entry_mc), fmt_mc(exit_mc), mc_move, exit_delay_ms
+                    );
+                }
+                Err(ref e) => {
+                    warn!("🔍 [DRY RUN] SELL quote FAILED for {}: {:?} | exit MC {}", mint, e, fmt_mc(exit_mc));
+                }
+            }
+
             return Ok(());
         }
 
