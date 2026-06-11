@@ -506,7 +506,7 @@ impl AutoTrader {
         // Initialize SimulationManager if dry_run_mode is enabled
         let simulation_manager = if config.dry_run_mode {
             info!("🔍 [DRY RUN] Mode enabled - trades will be simulated, not executed");
-            let sim_mgr = Arc::new(SimulationManager::new(birdeye_client.clone()));
+            let sim_mgr = Arc::new(SimulationManager::new(moralis_client.clone()));
             // Load existing simulated positions
             if let Err(e) = sim_mgr.load().await {
                 warn!("Failed to load simulated positions: {}", e);
@@ -603,6 +603,8 @@ impl AutoTrader {
         let mut strategies = self.strategies.write().await;
         *strategies = loaded_strategies;
 
+        let mut modified = false;
+
         // If no strategies loaded, create defaults for all three strategy types
         if strategies.is_empty() {
             info!("📋 No strategies found - creating default strategies for all types...");
@@ -624,11 +626,7 @@ impl AutoTrader {
             info!("✅ Created '{}' strategy (disabled)", np_strategy.name);
             strategies.insert(np_strategy.id.clone(), np_strategy);
 
-            // Save the default strategies to disk
-            drop(strategies); // Release lock before saving
-            if let Err(e) = self.save_strategies().await {
-                warn!("Failed to save default strategies to disk: {}", e);
-            }
+            modified = true;
         } else {
             info!("Loaded {} strategies", strategies.len());
         }
@@ -637,6 +635,23 @@ impl AutoTrader {
         // always boots into the intended mode (otherwise the bot can silently
         // revert and stop sniping). Defaults to FinalStretch when unset.
         let desired = Self::active_strategy_from_env();
+
+        // Guarantee an enabled strategy of the active type exists - persisted
+        // files can predate a strategy type or have it disabled, which would
+        // leave the scanner with no criteria and the bot silently idle.
+        if crate::trading::strategy::ensure_enabled_strategy(&mut strategies, &desired) {
+            info!("🛠️ No enabled {:?} strategy found - created/enabled one with default criteria", desired);
+            modified = true;
+        }
+
+        drop(strategies); // Release lock before saving
+
+        if modified {
+            if let Err(e) = self.save_strategies().await {
+                warn!("Failed to save strategies to disk: {}", e);
+            }
+        }
+
         {
             let mut active = self.active_strategy_type.write().await;
             *active = desired.clone();
@@ -889,7 +904,6 @@ impl AutoTrader {
         let jupiter_client = self.jupiter_client.clone();
         let simulation_manager = self.simulation_manager.clone();
         let moralis_client = self.moralis_client.clone();
-        let birdeye_client = self.birdeye_client.clone();
 
 
         // Take the Pump.fun token receiver for use in the task (if in dry run mode)
@@ -933,8 +947,8 @@ impl AutoTrader {
 
             // Create scanner for Final Stretch / Migrated strategies if Moralis is available
             let scanner = moralis_client.as_ref().map(|mc| {
-                info!("📡 Moralis scanner created - will poll every 15 seconds for FinalStretch/Migrated");
-                crate::trading::scanner::Scanner::new(mc.clone(), birdeye_client.clone())
+                info!("📡 Moralis scanner created - will poll every 30 seconds for FinalStretch/Migrated");
+                crate::trading::scanner::Scanner::new(mc.clone())
             });
             if scanner.is_none() {
                 warn!("⚠️ Moralis scanner NOT created - moralis_client is None");
@@ -1124,8 +1138,11 @@ impl AutoTrader {
                                     drop(strats);
 
                                     if let Some(strategy) = matching_strategy {
-                                        // Fetch SOL price for USD->SOL conversion
-                                        let sol_price_usd = birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
+                                        // Fetch SOL price for USD->SOL conversion (Moralis, cached 60s)
+                                        let sol_price_usd = match moralis_client.as_ref() {
+                                            Some(mc) => mc.get_sol_price_usd().await,
+                                            None => 150.0,
+                                        };
 
                                         // Run the scanner
                                         match sc.scan_cycle(&strategy).await {
@@ -1266,8 +1283,11 @@ impl AutoTrader {
                                             default_strategy.min_market_cap_usd.unwrap_or(0.0),
                                             default_strategy.min_bonding_progress.unwrap_or(0.0));
 
-                                        // Fetch SOL price for USD->SOL conversion
-                                        let sol_price_usd = birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
+                                        // Fetch SOL price for USD->SOL conversion (Moralis, cached 60s)
+                                        let sol_price_usd = match moralis_client.as_ref() {
+                                            Some(mc) => mc.get_sol_price_usd().await,
+                                            None => 150.0,
+                                        };
 
                                         // Run scanner with default strategy
                                         match sc.scan_cycle(&default_strategy).await {

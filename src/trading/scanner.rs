@@ -15,7 +15,6 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use crate::api::birdeye::BirdeyeClient;
 use crate::api::moralis::{MoralisClient, MoralisTokenWithHolders};
 use crate::trading::strategy::{Strategy, StrategyType};
 
@@ -59,7 +58,6 @@ pub struct ScanCandidate {
 /// Uses Moralis API to discover tokens directly
 pub struct Scanner {
     moralis_client: Arc<MoralisClient>,
-    birdeye_client: Arc<BirdeyeClient>,
     config: ScannerConfig,
     /// Track tokens we've already seen to avoid duplicate signals
     seen_tokens: Arc<RwLock<HashSet<String>>>,
@@ -68,14 +66,10 @@ pub struct Scanner {
 }
 
 impl Scanner {
-    /// Create a new scanner with Moralis and Birdeye clients
-    pub fn new(
-        moralis_client: Arc<MoralisClient>,
-        birdeye_client: Arc<BirdeyeClient>,
-    ) -> Self {
+    /// Create a new scanner with a Moralis client
+    pub fn new(moralis_client: Arc<MoralisClient>) -> Self {
         Self {
             moralis_client,
-            birdeye_client,
             config: ScannerConfig::default(),
             seen_tokens: Arc::new(RwLock::new(HashSet::new())),
             holder_history: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -85,12 +79,10 @@ impl Scanner {
     /// Create a new scanner with custom config
     pub fn with_config(
         moralis_client: Arc<MoralisClient>,
-        birdeye_client: Arc<BirdeyeClient>,
         config: ScannerConfig,
     ) -> Self {
         Self {
             moralis_client,
-            birdeye_client,
             config,
             seen_tokens: Arc::new(RwLock::new(HashSet::new())),
             holder_history: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -99,8 +91,8 @@ impl Scanner {
 
     /// Validate a candidate against advanced trade data filters (buy/sell ratio, unique wallets, volume)
     /// Returns (passed, volume)
-    /// - When Birdeye data is available: applies full filtering (volume, buy ratio, wallets)
-    /// - When Birdeye is rate-limited: falls back to Moralis data (liquidity check)
+    /// - Metrics come from Moralis (analytics, falling back to pair stats)
+    /// - When no metrics source responds: falls back to liquidity/mcap sanity checks
     async fn validate_trade_data(
         &self,
         addr: &str,
@@ -111,14 +103,14 @@ impl Scanner {
         moralis_liquidity_usd: f64,
         moralis_mcap_usd: f64,
     ) -> (bool, f64) {
-        // Fetch trade data from Birdeye
-        let trade_data = match self.birdeye_client.get_trade_data(addr).await {
-            Ok(Some(td)) => td,
-            Ok(None) | Err(_) => {
-                // Birdeye unavailable - apply fallback filters from Moralis data
+        // Fetch 24h trade metrics (analytics -> pair stats chain)
+        let metrics = match self.moralis_client.get_trade_metrics(addr).await {
+            Some(m) => m,
+            None => {
+                // No metrics source responded - apply fallback filters from token-list data
                 // Require minimum liquidity as a safety check (if Moralis provides it)
                 if moralis_liquidity_usd > 0.0 && moralis_liquidity_usd < 5_000.0 {
-                    info!("   {} rejected: low Moralis liquidity ${:.0} (Birdeye unavailable, using fallback)", symbol, moralis_liquidity_usd);
+                    info!("   {} rejected: low liquidity ${:.0} (trade metrics unavailable, using fallback)", symbol, moralis_liquidity_usd);
                     return (false, 0.0);
                 }
                 // Require reasonable mcap-to-liquidity ratio (avoid tokens with fake mcap)
@@ -130,16 +122,14 @@ impl Scanner {
                         return (false, 0.0);
                     }
                 }
-                info!("   {} allowed via Moralis fallback (liq: ${:.0}, mcap: ${:.0}) - Birdeye unavailable",
+                info!("   {} allowed via liquidity fallback (liq: ${:.0}, mcap: ${:.0}) - trade metrics unavailable",
                     symbol, moralis_liquidity_usd, moralis_mcap_usd);
                 return (true, 0.0);
             }
         };
 
-        // Volume check
-        let volume = trade_data.volume24h_usd
-            .or(trade_data.v24h_usd)
-            .unwrap_or(0.0);
+        // Volume check (24h buy volume + sell volume)
+        let volume = metrics.volume_24h_usd;
         if min_volume > 0.0 && volume < min_volume {
             info!("   {} rejected: volume ${:.0} < ${:.0} min", symbol, volume, min_volume);
             return (false, volume);
@@ -147,8 +137,8 @@ impl Scanner {
 
         // Buy/sell ratio check
         if min_buy_ratio > 0.0 {
-            let buys = trade_data.buy24h.unwrap_or(0) as f64;
-            let sells = trade_data.sell24h.unwrap_or(0) as f64;
+            let buys = metrics.buys_24h as f64;
+            let sells = metrics.sells_24h as f64;
             let total_trades = buys + sells;
             if total_trades > 0.0 {
                 let buy_ratio = (buys / total_trades) * 100.0;
@@ -166,7 +156,7 @@ impl Scanner {
 
         // Unique wallet check (filters wash trading)
         if let Some(min_wallets) = min_unique_wallets {
-            let unique_wallets = trade_data.unique_wallet24h.unwrap_or(0);
+            let unique_wallets = metrics.unique_wallets_24h;
             if unique_wallets < min_wallets {
                 info!("   {} rejected: {} unique wallets < {} min (possible wash trading)",
                     symbol, unique_wallets, min_wallets);
@@ -285,7 +275,7 @@ impl Scanner {
                     volume, candidate.holders);
             }
 
-            // Small delay between Birdeye calls
+            // Small delay between analytics calls
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 

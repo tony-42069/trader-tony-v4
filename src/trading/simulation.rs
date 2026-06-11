@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use crate::api::birdeye::BirdeyeClient;
+use crate::api::moralis::MoralisClient;
 use crate::models::simulated_position::{SimulatedPosition, SimulatedPositionStatus, SimulationStats};
 
 const SIMULATED_POSITIONS_FILE: &str = "data/simulated_positions.json";
@@ -15,15 +15,18 @@ const SIMULATED_POSITIONS_FILE: &str = "data/simulated_positions.json";
 pub struct SimulationManager {
     positions: Arc<RwLock<HashMap<String, SimulatedPosition>>>,
     data_path: PathBuf,
-    birdeye_client: Arc<BirdeyeClient>,
+    moralis_client: Option<Arc<MoralisClient>>,
 }
 
 impl SimulationManager {
-    pub fn new(birdeye_client: Arc<BirdeyeClient>) -> Self {
+    pub fn new(moralis_client: Option<Arc<MoralisClient>>) -> Self {
+        if moralis_client.is_none() {
+            warn!("SimulationManager created without Moralis client - simulated prices will not update");
+        }
         Self {
             positions: Arc::new(RwLock::new(HashMap::new())),
             data_path: PathBuf::from(SIMULATED_POSITIONS_FILE),
-            birdeye_client,
+            moralis_client,
         }
     }
 
@@ -143,8 +146,16 @@ impl SimulationManager {
         Ok(position)
     }
 
-    /// Update prices for all open positions using Birdeye
+    /// Update prices for all open positions using Moralis
     pub async fn update_prices(&self) -> Result<()> {
+        let moralis = match self.moralis_client.as_ref() {
+            Some(mc) => mc,
+            None => {
+                warn!("Cannot update simulated prices - no Moralis client configured");
+                return Ok(());
+            }
+        };
+
         let mut positions = self.positions.write().await;
         let open_positions: Vec<_> = positions
             .values()
@@ -161,21 +172,20 @@ impl SimulationManager {
             open_positions.len()
         );
 
-        // Get SOL price for USD to SOL conversion
-        let sol_price_usd = self.birdeye_client.get_sol_price_usd().await.unwrap_or(150.0);
-
         for token_address in open_positions {
-            match self.birdeye_client.get_token_overview(&token_address).await {
-                Ok(Some(token_data)) => {
-                    // Convert USD price to SOL price
-                    let price_sol = if let Some(price_usd) = token_data.price {
-                        if sol_price_usd > 0.0 {
-                            price_usd / sol_price_usd
-                        } else {
-                            0.0
+            match moralis.get_token_price(&token_address).await {
+                Ok(Some(price_data)) => {
+                    // Prefer the native SOL price; fall back to USD conversion
+                    let price_sol = match price_data.price_sol() {
+                        Some(p) => p,
+                        None => {
+                            let sol_price_usd = moralis.get_sol_price_usd().await;
+                            if sol_price_usd > 0.0 {
+                                price_data.usd_price_f64() / sol_price_usd
+                            } else {
+                                0.0
+                            }
                         }
-                    } else {
-                        0.0
                     };
 
                     if price_sol > 0.0 {
@@ -208,6 +218,9 @@ impl SimulationManager {
                     );
                 }
             }
+
+            // Small delay between price calls to be gentle on rate limits
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
         drop(positions);

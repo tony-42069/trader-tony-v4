@@ -8,6 +8,21 @@ primary_region = 'ord'
 
 [build]
 
+[env]
+  # Boot directly into the TelegramCall sniper and start trading without
+  # manual intervention. TelegramCall mode listens to @cryptoyeezuscalls and
+  # does NOT call Moralis (so it won't burn the Moralis quota). NOTE: `fly
+  # secrets` with the same name override these values - keep ACTIVE_STRATEGY
+  # out of secrets.
+  ACTIVE_STRATEGY = 'telegram_call'
+  AUTO_START_TRADING = 'true'
+  RUST_LOG = 'info'
+  # Safe default: simulate trades. Go live with:
+  #   fly secrets set DRY_RUN_MODE=false
+  # (secrets override this value; unset the secret to return to dry-run)
+  DRY_RUN_MODE = 'true'
+  DEMO_MODE = 'false'
+
 [http_service]
   internal_port = 3030
   force_https = true
